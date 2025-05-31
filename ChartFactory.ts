@@ -10,13 +10,13 @@ import { ChartState } from './ChartState';
 import { ExportManager } from './ExportManager';
 import { GestureManager } from './GestureManager';
 import { PerformanceMonitor } from './PerformanceMonitor';
+import { IndicatorManager } from './IndicatorManager';
 import { IndicatorRenderer } from './IndicatorRenderer';
 import { PatternManager } from './PatternManager';
 import { LocalizationManager } from './LocalizationManager';
 import { ErrorHandler } from './ErrorHandler';
 import { DataValidator } from './DataValidator';
 import { ChartLayout } from './ChartLayout';
-import { IndicatorConfig } from './IndicatorConfig';
 import { PluginManager } from './PluginManager';
 import { ChartHistory } from './ChartHistory';
 import { InteractionManager } from './InteractionManager';
@@ -99,6 +99,8 @@ export class ChartFactory {
       kineticAnimation
     );
 
+    const indicatorRenderer = new IndicatorRenderer(priceScaleEngine, timeScaleEngine);
+    const indicatorManager = new IndicatorManager(indicatorRenderer);
     const patternRenderer = new PatternRenderer();
     const patternManager = new PatternManager(
       patternRenderer,
@@ -119,21 +121,11 @@ export class ChartFactory {
       styleManager
     );
 
-    const indicatorRenderer = new IndicatorRenderer(drawingToolManager, styleManager, canvas);
-    const indicatorConfig = new IndicatorConfig(
-      { addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as any,
-      styleManager
-    );
-    const pluginManager = new PluginManager(drawingToolManager, errorHandler);
-
-    const chartState = new ChartState(timeScaleEngine, priceScaleEngine, {
-      addIndicator: () => {},
-      removeIndicator: () => {},
-      activeIndicators: [],
-    } as any);
+    const chartState = new ChartState(timeScaleEngine, priceScaleEngine, indicatorManager);
     const exportManager = new ExportManager({ canvas } as ChartWidget, styleManager);
     const chartLayout = new ChartLayout(container, styleManager);
     const themeEditor = new ThemeEditor(styleManager);
+    const pluginManager = new PluginManager(drawingToolManager, errorHandler);
 
     // Initialize ChartWidget
     const chartOptions: Partial<ChartOptions> = {
@@ -153,6 +145,7 @@ export class ChartFactory {
       drawingToolManager,
       kineticAnimation,
       patternManager,
+      indicatorManager,
       chartOptions
     );
     chartLayout.addChart(widget, crosshairManager, timeScaleEngine);
@@ -178,7 +171,7 @@ export class ChartFactory {
     // Assign managers to widget for access
     widget['crosshairManager'] = crosshairManager;
     widget['drawingToolManager'] = drawingToolManager;
-    widget['indicatorRenderer'] = indicatorRenderer;
+    widget['indicatorManager'] = indicatorManager;
     widget['tooltipManager'] = tooltipManager;
     widget['gestureManager'] = gestureManager;
     widget['interactionManager'] = interactionManager;
