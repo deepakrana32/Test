@@ -3,7 +3,7 @@ import { Chart } from 'chart.js';
 import { ChartRenderer } from './ChartRenderer';
 import { ChartEventManager } from './ChartEventManager';
 import { ChartPlugins, ChartPlugin } from './ChartPlugins';
-import { ChartConfig, DrawingTool, DrawingToolState, PriceScaleOptions, TimeScaleOptions, validateChartConfig, mergeChartOptions } from './ChartTypes';
+import { ChartConfig, DrawingTool, DrawingToolState, PriceScaleOptions, TimeScaleOptions, validateChartConfig, mergeChartOptions, Candle } from './ChartTypes';
 import { DrawingToolManager } from './DrawingToolManager';
 import { throttle } from 'lodash';
 
@@ -321,6 +321,23 @@ export class ChartEngineCore {
   }
 
   /**
+   * Validates a single candlestick data point.
+   * @private
+   */
+  private validateCandle(candle: Candle): void {
+    const { open, high, low, close, volume, time } = candle;
+    if (!Number.isFinite(open) || open < 0) throw new Error('Invalid open price');
+    if (!Number.isFinite(high) || high < 0) throw new Error('Invalid high price');
+    if (!Number.isFinite(low) || low < 0) throw new Error('Invalid low price');
+    if (!Number.isFinite(close) || close < 0) throw new Error('Invalid close price');
+    if (!Number.isFinite(volume) || volume < 0) throw new Error('Invalid volume');
+    if (!Number.isFinite(time) || time <= 0) throw new Error('Invalid timestamp');
+    if (low > high) throw new Error('Low price cannot exceed high price');
+    if (open < low || open > high) throw new Error('Open price must be between low and high');
+    if (close < low || close > high) throw new Error('Close price must be between low and high');
+  }
+
+  /**
    * Fetches chart data from a URL.
    * @param url Data endpoint.
    * @returns Chart configuration.
@@ -330,12 +347,20 @@ export class ChartEngineCore {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      if (!Array.isArray(data.candles)) throw new Error('Invalid data: candles must be an array');
+      data.candles.forEach((candle: Candle, index: number) => {
+        try {
+          this.validateCandle(candle);
+        } catch (error) {
+          throw new Error(`Invalid candle at index ${index}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      });
       return {
         type: 'candlestick',
         data: {
           datasets: [{
             label: 'Candlestick',
-            data: data.candles || [],
+            data: data.candles,
           }],
         },
         options: mergeChartOptions({
