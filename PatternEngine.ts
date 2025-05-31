@@ -1,192 +1,140 @@
-```typescript
-// PatternEngine.ts
-// CPU-based engine for detecting candlestick and structure patterns
+import { Candle, Tick, Pattern } from './PatternTypes';
+import { ChartRenderer } from './ChartRenderer';
+import { CrosshairManager } from './CrosshairManager';
 
-import { Candle } from "@/types/Candle";
-import { PatternFlags, PatternResult, PatternType, PatternCategory, validatePatternResult } from "@/types/PatternTypes";
-import { detectCandlePatterns } from "./patterns/candlePatterns";
-import { detectStructurePatterns } from "./patterns/structurePatterns";
-
-// Interface for pattern match
-interface PatternMatch {
-  index: number;
-  flags: PatternFlags;
-  typeLabels: PatternType[];
-  category: PatternCategory;
-}
-
-// Interface for pattern detector
-interface PatternDetector {
-  name: string;
-  category: PatternCategory;
-  detect: (candles: Candle[], index: number, lookback?: number) => PatternMatch | null;
-}
-
-// Interface for pattern engine configuration
-interface PatternEngineConfig {
-  enableCandlestick: boolean;
-  enableStructure: boolean;
-  maxPatternLookback: number;
-  lodLevel: number;
-}
-
-/**
- * Validates a candle's properties.
- * @param candle The candle to validate.
- * @returns True if valid, false otherwise.
- */
-function validateCandle(candle: Candle): boolean {
-  return (
-    Number.isFinite(candle.open) &&
-    Number.isFinite(candle.high) &&
-    Number.isFinite(candle.low) &&
-    Number.isFinite(candle.close) &&
-    Number.isFinite(candle.volume) &&
-    candle.high >= candle.low
-  );
-}
-
-/**
- * CPU-based engine for detecting candlestick and structure patterns.
- */
 export class PatternEngine {
-  private readonly candles: ReadonlyArray<Candle>;
-  private readonly config: Readonly<PatternEngineConfig>;
-  private results: PatternResult[] = [];
-  private readonly detectors: PatternDetector[];
+  private candles: Candle[] | null;
+  private ticks: Tick[] | null;
+  private patterns: Pattern[];
+  private cache: Map<string, Pattern[]>;
+  private renderer: ChartRenderer;
+  private crosshairManager: CrosshairManager;
 
-  constructor(candles: Candle[], config?: Partial<PatternEngineConfig>) {
-    if (!Array.isArray(candles) || candles.length === 0) {
-      throw new Error('Invalid candles: must be a non-empty array');
-    }
-    if (!candles.every(validateCandle)) {
-      throw new Error('Invalid candles: all candles must have finite open, high, low, close, and volume');
-    }
+  constructor(renderer: ChartRenderer, crosshairManager: CrosshairManager) {
+    if (!renderer || !crosshairManager) throw new Error('Renderer or crosshair manager missing');
+    this.candles = null;
+    this.ticks = null;
+    this.patterns = [];
+    this.cache = new Map();
+    this.renderer = renderer;
+    this.crosshairManager = crosshairManager;
+    this.setupEventListeners();
+  }
 
-    const maxPatternLookback = config?.maxPatternLookback ?? 100;
-    const lodLevel = config?.lodLevel ?? 1;
-    if (maxPatternLookback < 1 || !Number.isInteger(maxPatternLookback)) {
-      throw new Error('Invalid maxPatternLookback: must be a positive integer');
-    }
-    if (lodLevel < 1 || lodLevel > 5 || !Number.isInteger(lodLevel)) {
-      throw new Error('Invalid lodLevel: must be an integer between 1 and 5');
-    }
+  private setupEventListeners() {
+    this.crosshairManager.on('crosshair', () => this.renderer.requestRender());
+  }
 
+  setData(candles: Candle[] | null, ticks: Tick[] | null) {
     this.candles = candles;
-    this.config = {
-      enableCandlestick: config?.enableCandlestick ?? true,
-      enableStructure: config?.enableStructure ?? true,
-      maxPatternLookback,
-      lodLevel,
-    };
-
-    this.detectors = [
-      {
-        name: "CandlestickDetector",
-        category: PatternCategory.Candlestick,
-        detect: (candles, index) => {
-          const result = detectCandlePatterns(candles, index);
-          return result ? { ...result, category: PatternCategory.Candlestick } : null;
-        },
-      },
-      {
-        name: "StructureDetector",
-        category: PatternCategory.Structure,
-        detect: (candles, index, lookback) => {
-          const result = detectStructurePatterns(candles, index, lookback);
-          return result ? { ...result, category: PatternCategory.Structure } : null;
-        },
-      },
-    ];
+    this.ticks = ticks;
+    this.computePatterns();
   }
 
-  public run(): ReadonlyArray<PatternResult> {
-    this.results = [];
+  private computePatterns() {
+    this.patterns = [];
+    const data = this.candles || this.ticks?.map(t => ({
+      open: t.price,
+      high: t.price,
+      low: t.price,
+      close: t.price,
+      time: t.time,
+      volume: t.volume,
+    })) || [];
 
-    for (let i = 0; i < this.candles.length; i++) {
-      const result: PatternResult = {
-        index: i,
-        flags: 0,
-        typeLabels: [],
-        category: PatternCategory.Candlestick,
-      };
-      const typeLabelSet = new Set<PatternType>();
+    if (data.length < 5) return;
 
-      for (const detector of this.detectors) {
-        try {
-          if (
-            (detector.category === PatternCategory.Candlestick && !this.config.enableCandlestick) ||
-            (detector.category === PatternCategory.Structure && (!this.config.enableStructure || i < this.config.maxPatternLookback))
-          ) {
-            continue;
-          }
+    // Elliott Wave (5-3 structure)
+    this.detectElliottWave(data);
 
-          const match = detector.detect(
-            this.candles,
-            i,
-            detector.category === PatternCategory.Structure ? this.config.maxPatternLookback : undefined
-          );
+    // Gartley Pattern
+    this.detectGartley(data);
 
-          if (match) {
-            result.flags |= match.flags;
-            result.category = match.category;
-            match.typeLabels.forEach(label => typeLabelSet.add(label));
-          }
-        } catch (error) {
-          console.warn(
-            `Pattern detector "${detector.name}" failed at index ${i}: ${error instanceof Error ? error.message : 'Unknown error'}`
-          );
-        }
-      }
+    // BPM Pattern
+    this.detectBPM(data);
 
-      if (result.flags > 0) {
-        result.typeLabels = Array.from(typeLabelSet);
-        if (validatePatternResult(result)) {
-          this.results.push(result);
-        } else {
-          console.warn(`Invalid PatternResult at index ${i}`);
-        }
-      }
-    }
-
-    return this.results;
+    this.cache.set('patterns', this.patterns);
   }
 
-  public updateConfig(config: Partial<PatternEngineConfig>): void {
-    const newConfig: PatternEngineConfig = { ...this.config };
-
-    if (typeof config.enableCandlestick === 'boolean') {
-      newConfig.enableCandlestick = config.enableCandlestick;
-    }
-    if (typeof config.enableStructure === 'boolean') {
-      newConfig.enableStructure = config.enableStructure;
-    }
-    if (config.maxPatternLookback !== undefined) {
-      if (config.maxPatternLookback < 1 || !Number.isInteger(config.maxPatternLookback)) {
-        throw new Error('Invalid maxPatternLookback: must be a positive integer');
+  private detectElliottWave(data: any[]) {
+    for (let i = 4; i < data.length - 3; i++) {
+      const wave1 = data[i - 4].close < data[i - 3].close;
+      const wave2 = data[i - 3].close > data[i - 2].close;
+      const wave3 = data[i - 2].close < data[i - 1].close;
+      const wave4 = data[i - 1].close > data[i].close;
+      const wave5 = data[i].close < data[i + 1].close;
+      if (wave1 && wave2 && wave3 && wave4 && wave5) {
+        this.patterns.push({
+          type: 'elliott_wave',
+          points: [i - 4, i - 3, i - 2, i - 1, i, i + 1].map(idx => ({
+            index: idx,
+            price: data[idx].close,
+          })),
+        });
       }
-      newConfig.maxPatternLookback = config.maxPatternLookback;
-    }
-    if (config.lodLevel !== undefined) {
-      if (config.lodLevel < 1 || config.lodLevel > 5 || !Number.isInteger(config.lodLevel)) {
-        throw new Error('Invalid lodLevel: must be an integer between 1 and 5');
-      }
-      newConfig.lodLevel = config.lodLevel;
-    }
-
-    if (
-      newConfig.enableCandlestick !== this.config.enableCandlestick ||
-      newConfig.enableStructure !== this.config.enableStructure ||
-      newConfig.maxPatternLookback !== this.config.maxPatternLookback ||
-      newConfig.lodLevel !== this.config.lodLevel
-    ) {
-      Object.assign(this.config, newConfig);
-      this.results = [];
     }
   }
 
-  public getResults(): ReadonlyArray<PatternResult> {
-    return this.results;
+  private detectGartley(data: any[]) {
+    for (let i = 4; i < data.length; i++) {
+      const xa = data[i - 4].close;
+      const ab = data[i - 3].close;
+      const bc = data[i - 2].close;
+      const cd = data[i - 1].close;
+      const xd = data[i].close;
+      const abRet = Math.abs(ab - xa) * 0.618;
+      const bcRet = Math.abs(bc - ab) * 0.382;
+      const cdRet = Math.abs(cd - bc) * 1.272;
+      if (
+        Math.abs(ab - xa - abRet) < 0.1 &&
+        Math.abs(bc - ab - bcRet) < 0.1 &&
+        Math.abs(xd - cd - cdRet) < 0.1
+      ) {
+        this.patterns.push({
+          type: 'gartley',
+          points: [i - 4, i - 3, i - 2, i - 1, i].map(idx => ({
+            index: idx,
+            price: data[idx].close,
+          })),
+        });
+      }
+    }
+  }
+
+  private detectBPM(data: any[]) {
+    for (let i = 4; i < data.length; i++) {
+      const xa = data[i - 4].close;
+      const ab = data[i - 3].close;
+      const bc = data[i - 2].close;
+      const cd = data[i - 1].close;
+      const xd = data[i].close;
+      const abRet = Math.abs(ab - xa) * 0.786;
+      const bcRet = Math.abs(bc - ab) * 0.618;
+      const cdRet = Math.abs(cd - bc) * 1.618;
+      if (
+        Math.abs(ab - xa - abRet) < 0.1 &&
+        Math.abs(bc - ab - bcRet) < 0.1 &&
+        Math.abs(xd - cd - cdRet) < 0.1
+      ) {
+        this.patterns.push({
+          type: 'bpm',
+          points: [i - 4, i - 3, i - 2, i - 1, i].map(idx => ({
+            index: idx,
+            price: data[idx].close,
+          })),
+        });
+      }
+    }
+  }
+
+  getPatterns(): Pattern[] {
+    return this.patterns;
+  }
+
+  destroy() {
+    this.candles = null;
+    this.ticks = null;
+    this.patterns = [];
+    this.cache.clear();
   }
 }
-```
