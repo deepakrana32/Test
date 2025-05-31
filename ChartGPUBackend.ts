@@ -1,182 +1,125 @@
-// ChartGPUBackend.ts
-import { ChartPlugins } from './ChartPlugins';
-
-interface ChartGPUConfig {
-  alphaMode?: GPUCanvasAlphaMode;
-  format?: GPUTextureFormat;
-  clearColor?: GPUColorDict;
-  pixelRatio?: number;
-}
+import { Candle, Tick, Series, PriceScaleResult, TimeScaleResult, DrawingTool } from './ChartTypes';
 
 export class ChartGPUBackend {
-  private readonly canvas: HTMLCanvasElement;
-  private readonly plugins: ChartPlugins;
-  private readonly config: ChartGPUConfig;
-  private context: GPUCanvasContext | null = null;
-  private device: GPUDevice | null = null;
-  private format: GPUTextureFormat | null = null;
-  private isInitialized: boolean = false;
-  private renderPassDescriptor: GPURenderPassDescriptor;
+  private canvas: HTMLCanvasElement;
+  private gl: WebGL2RenderingContext | null;
+  private device: GPUDevice | null;
+  private context: GPUCanvasContext | null;
+  private renderPass: GPURenderPassEncoder | null;
+  private buffers: Map<string, GPUBuffer>;
 
-  constructor(canvas: HTMLCanvasElement, plugins: ChartPlugins, config: ChartGPUConfig = {}) {
-    if (!(canvas instanceof HTMLCanvasElement)) {
-      throw new Error('Invalid canvas: must be an HTMLCanvasElement');
-    }
-
+  constructor(
+    canvas: HTMLCanvasElement,
+    gl: WebGL2RenderingContext | null
+  ) {
     this.canvas = canvas;
-    this.plugins = plugins;
-    this.config = {
-      alphaMode: config.alphaMode ?? 'opaque',
-      format: config.format ?? navigator.gpu?.getPreferredCanvasFormat() ?? 'bgra8unorm',
-      clearColor: config.clearColor ?? { r: 0, g: 0, b: 0, a: 1 },
-      pixelRatio: config.pixelRatio ?? window.devicePixelRatio ?? 1,
-    };
-
-    this.renderPassDescriptor = {
-      colorAttachments: [
-        {
-          view: {} as GPUTextureView,
-          clearValue: this.config.clearColor,
-          loadOp: 'clear' as const,
-          storeOp: 'store' as const,
-        },
-      ],
-    };
+    this.gl = gl;
+    this.device = null;
+    this.context = null;
+    this.renderPass = null;
+    this.buffers = new Map();
+    this.initializeWebGPU().catch(console.error);
   }
 
-  async initialize(width: number, height: number): Promise<void> {
-    if (this.isInitialized) {
-      console.warn('ChartGPUBackend already initialized');
-      return;
-    }
-
-    if (!navigator.gpu) {
-      throw new Error('WebGPU not supported in this browser');
-    }
-
+  private async initializeWebGPU() {
+    if (!navigator.gpu) return;
     const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-      throw new Error('GPU adapter not found');
-    }
-
+    if (!adapter) return;
     this.device = await adapter.requestDevice();
-    if (!this.device) {
-      throw new Error('Failed to create GPU device');
-    }
+    this.context = this.canvas.getContext('webgpu')!;
+    this.context.configure({
+      device: this.device,
+      format: navigator.gpu.getPreferredCanvasFormat(),
+      alphaMode: 'premultiplied',
+    });
+  }
 
-    const context = this.canvas.getContext('webgpu');
-    if (!context) {
-      this.device.destroy();
-      this.device = null;
-      throw new Error('WebGPU context not supported or canvas is invalid');
-    }
-    this.context = context;
-    this.format = this.config.format;
-
-    try {
-      this.context.configure({
-        device: this.device,
-        format: this.format,
-        alphaMode: this.config.alphaMode,
+  setData(candles: Candle[] | null, ticks: Tick[] | null) {
+    if (this.device && (candles || ticks)) {
+      const data = candles || ticks!;
+      const buffer = this.device.createBuffer({
+        size: data.length * 4 * 4, // Float32 per attribute
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       });
-
-      this.canvas.width = width * this.config.pixelRatio;
-      this.canvas.height = height * this.config.pixelRatio;
-      this.canvas.style.width = `${width}px`;
-      this.canvas.style.height = `${height}px`;
-
-      await this.plugins.initializeGPU(this.device);
-      this.isInitialized = true;
-    } catch (error) {
-      this.cleanup();
-      throw new Error(`Initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.device.queue.writeBuffer(buffer, 0, new Float32Array(data.flatMap(d => 'open' in d ? [d.open, d.high, d.low, d.close] : [d.price, d.time, d.volume, 0])));
+      this.buffers.set('data', buffer);
     }
   }
 
-  render(): void {
-    if (!this.isInitialized || !this.context || !this.device || !this.format) {
-      console.warn('Cannot render: ChartGPUBackend not initialized');
-      return;
-    }
-
-    try {
-      const commandEncoder = this.device.createCommandEncoder();
-      const textureView = this.context.getCurrentTexture().createView();
-
-      this.renderPassDescriptor.colorAttachments[0].view = textureView;
-
-      const pass = commandEncoder.beginRenderPass(this.renderPassDescriptor);
-      try {
-        this.plugins.renderGPU(pass);
-      } catch (error) {
-        console.error(`Plugin render failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      } finally {
-        pass.end();
-      }
-
-      this.device.queue.submit([commandEncoder.finish()]);
-    } catch (error) {
-      console.error(`Render failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  updateConfig(config: Partial<ChartGPUConfig>): void {
-    let needsReinitialize = false;
-
-    if (config.alphaMode && config.alphaMode !== this.config.alphaMode) {
-      this.config.alphaMode = config.alphaMode;
-      needsReinitialize = true;
-    }
-    if (config.format && config.format !== this.config.format) {
-      this.config.format = config.format;
-      needsReinitialize = true;
-    }
-    if (config.clearColor) {
-      this.config.clearColor = config.clearColor;
-      this.renderPassDescriptor.colorAttachments[0].clearValue = config.clearColor;
-    }
-    if (config.pixelRatio && config.pixelRatio !== this.config.pixelRatio) {
-      this.config.pixelRatio = config.pixelRatio;
-      needsReinitialize = true;
-    }
-
-    if (needsReinitialize && this.isInitialized) {
-      this.destroy();
-      this.initialize(this.canvas.width / this.config.pixelRatio, this.canvas.height / this.config.pixelRatio).catch(error => {
-        console.error(`Reinitialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      });
-    }
-  }
-
-  destroy(): void {
-    if (!this.isInitialized) {
-      return;
-    }
-    this.cleanup();
-  }
-
-  private cleanup(): void {
-    try {
-      this.plugins.destroy();
-    } catch (error) {
-      console.warn(`Plugin cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-
+  setDrawingTools(tools: DrawingTool[]) {
     if (this.device) {
-      this.device.destroy();
-      this.device = null;
+      const buffer = this.device.createBuffer({
+        size: tools.length * 4 * 4, // Float32 for positions
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(buffer, 0, new Float32Array(tools.flatMap(t => {
+        const d = t.data as any;
+        return [d.startIndex || d.index || 0, d.startPrice || d.price || 0, d.endIndex || d.targetIndex || 0, d.endPrice || d.targetPrice || 0];
+      })));
+      this.buffers.set('tools', buffer);
     }
+  }
 
-    if (this.context) {
-      this.context.unconfigure();
-      this.context = null;
+  setIndicator(id: string, data: Float32Array) {
+    if (this.device) {
+      const buffer = this.device.createBuffer({
+        size: data.length * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(buffer, 0, data);
+      this.buffers.set(`indicator_${id}`, buffer);
     }
+  }
 
-    this.format = null;
-    this.isInitialized = false;
+  renderSeries(series: Series, priceScale: PriceScaleResult, timeScale: TimeScaleResult) {
+    if (this.gl) {
+      // WebGL rendering
+      this.renderWebGL(series, priceScale, timeScale);
+    } else if (this.device && this.context) {
+      // WebGPU rendering
+      const commandEncoder = this.device.createCommandEncoder();
+      this.renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+          view: this.context.getCurrentTexture().createView(),
+          clearValue: { r: 1, g: 1, b: 1, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        }],
+      });
+      // Placeholder for shader pipeline
+      this.renderPass.end();
+      this.device.queue.submit([commandEncoder.finish()]);
+    }
+  }
+
+  private renderWebGL(series: Series, priceScale: PriceScaleResult, timeScale: TimeScaleResult) {
+    if (!this.gl) return;
+    // Placeholder for WebGL rendering
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    // Render series using instanced rendering
+  }
+
+  renderIndicator(id: string, priceScale: PriceScaleResult, timeScale: TimeScaleResult) {
+    if (this.gl) {
+      // WebGL indicator rendering
+    } else if (this.device && this.renderPass) {
+      // WebGPU indicator rendering
+    }
   }
 
   getDevice(): GPUDevice | null {
     return this.device;
+  }
+
+  getRenderPass(): GPURenderPassEncoder | null {
+    return this.renderPass;
+  }
+
+  destroy() {
+    this.buffers.forEach(b => b.destroy());
+    this.buffers.clear();
+    this.device = null;
+    this.context = null;
+    this.renderPass = null;
   }
 }
