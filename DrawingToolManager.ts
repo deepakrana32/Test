@@ -154,6 +154,9 @@ export class DrawingToolManager {
   private ticks: Float32Array | null;
   private highlightedToolId: string | null;
   private liveRegion: HTMLElement;
+  private lastX: number | null = null;
+  private lastTime: number | null = null;
+  private velocity: number = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -334,7 +337,9 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      this.animationManager?.startAnimation('scroll', (dx) => this.widget?.handleScroll(dx / this.scaleX(1)), data.x / 10);
+      this.lastX = data.x;
+      this.lastTime = performance.now();
+      this.velocity = 0;
       this.handleInteraction('mousedown', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -345,6 +350,13 @@ export class DrawingToolManager {
     if (!this.canvas) return;
     try {
       const data = this.getInteractionData(event);
+      if (this.lastX !== null && this.lastTime !== null) {
+        const dx = data.x - this.lastX;
+        const dt = (performance.now() - this.lastTime) / 1000;
+        this.velocity = dx / dt; // Pixels per second
+        this.lastX = data.x;
+        this.lastTime = performance.now();
+      }
       this.handleInteraction('mousemove', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -355,7 +367,12 @@ export class DrawingToolManager {
     if (!this.canvas) return;
     try {
       const data = this.getInteractionData(event);
-      this.animationManager?.stopAnimation('scroll');
+      if (this.velocity !== 0) {
+        this.animationManager?.startAnimation('scroll', (dx) => this.widget?.handleScroll(dx / this.scaleX(1)), this.velocity / 10, 0.9);
+      }
+      this.lastX = null;
+      this.lastTime = null;
+      this.velocity = 0;
       this.handleInteraction('mouseup', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -367,7 +384,9 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      this.animationManager?.startAnimation('scroll', (dx) => this.widget?.handleScroll(dx / this.scaleX(1)), data.x / 10);
+      this.lastX = data.x;
+      this.lastTime = performance.now();
+      this.velocity = 0;
       this.handleInteraction('mousedown', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -379,6 +398,13 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
+      if (this.lastX !== null && this.lastTime !== null) {
+        const dx = data.x - this.lastX;
+        const dt = (performance.now() - this.lastTime) / 1000;
+        this.velocity = dx / dt;
+        this.lastX = data.x;
+        this.lastTime = performance.now();
+      }
       this.handleInteraction('mousemove', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -390,7 +416,12 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      this.animationManager?.stopAnimation('scroll');
+      if (this.velocity !== 0) {
+        this.animationManager?.startAnimation('scroll', (dx) => this.widget?.handleScroll(dx / this.scaleX(1)), this.velocity / 10, 0.9);
+      }
+      this.lastX = null;
+      this.lastTime = null;
+      this.velocity = 0;
       this.handleInteraction('mouseup', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -453,11 +484,11 @@ export class DrawingToolManager {
 
   private handleCrosshair(event: CrosshairEvent): void {
     try {
-      const hitTool = this.findHitTool(event.x ? this.unscaleX(event.x) : 0, event.y ? this.unscaleY(event.y) : 0);
+      const hitTool = this.findHitTool(event.index, event.price);
       this.highlightedToolId = hitTool?.id || null;
       this.widget?.requestRender();
       if (hitTool) {
-        this.updateLiveRegion(`Highlighted tool ${hitTool.type} at ${this.localizationManager.formatPrice(event.y ? this.unscaleY(event.y) : 0)}`);
+        this.updateLiveRegion(`Highlighted tool ${hitTool.type} at ${this.localizationManager.formatPrice(event.price)}`);
       }
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -788,11 +819,11 @@ export class DrawingToolManager {
   }
 
   private findHitTool(index: number, price: number): DrawingTool | null {
+    const hitThreshold = 5;
     for (const t of [...this.tools].sort((a, b) => (b.data.zIndex || 0) - (a.data.zIndex || 0))) {
       if (t.data.locked) continue;
       const d = t.data as any;
       try {
-        const hitThreshold = 5;
         if (['trendline', 'arrow', 'extendedLine', 'ray'].includes(t.type)) {
           const dx = d.endIndex - d.startIndex;
           const dy = d.endPrice - d.startPrice;
@@ -1009,7 +1040,6 @@ export class DrawingToolManager {
           case 'text':
             drawText(ctx, d.text.value, this.scaleX(d.index), this.scaleY(d.price), d.text.font.color, `${d.text.font.size}px ${d.text.font.family}`, theme.tooltipBackground);
             break;
-          // Add other tool renderings as needed
         }
         ctx.restore();
       });
@@ -1080,6 +1110,9 @@ export class DrawingToolManager {
       this.redoStack = [];
       this.ticks = null;
       this.liveRegion.remove();
+      this.lastX = null;
+      this.lastTime = null;
+      this.velocity = 0;
     } catch (error) {
       this.errorHandler.handleError(error as Error);
     }
