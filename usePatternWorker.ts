@@ -1,87 +1,51 @@
-```typescript
-// usePatternWorker.ts
-// React hook for managing communication with pattern.worker.ts
+import { Candle, Tick, Pattern } from './PatternTypes';
+import { ChartRenderer } from './ChartRenderer';
 
-import { useState, useEffect, useRef } from 'react';
-import { Candle } from '@/types/Candle';
-import { PatternResult, validatePatternResult } from '@/types/PatternTypes';
+export class PatternWorkerManager {
+  private worker: Worker | null;
+  private renderer: ChartRenderer;
+  private patterns: Pattern[];
+  private callbacks: ((patterns: Pattern[]) => void)[];
 
-// Interface for worker configuration
-interface WorkerConfig {
-  enableCandlestick: boolean;
-  enableStructure: boolean;
-  maxPatternLookback: number;
-  batchSize?: number; // Number of candles to process per batch (default: 1000)
-}
+  constructor(renderer: ChartRenderer) {
+    if (!renderer) throw new Error('Renderer missing');
+    this.worker = new Worker(new URL('./pattern.worker.ts', import.meta.url));
+    this.renderer = renderer;
+    this.patterns = [];
+    this.callbacks = [];
+    this.setupWorker();
+  }
 
-// Interface for worker response
-interface WorkerResponse {
-  type: 'success' | 'error';
-  data?: PatternResult[];
-  error?: string;
-}
-
-/**
- * Hook to manage communication with pattern.worker.ts.
- * @param candles Array of candlestick data.
- * @param config Worker configuration.
- * @returns Pattern detection results.
- */
-export function usePatternWorker(candles: Candle[], config: WorkerConfig): PatternResult[] {
-  const [results, setResults] = useState<PatternResult[]>([]);
-  const workerRef = useRef<Worker | null>(null);
-
-  useEffect(() => {
-    // Validate inputs
-    if (!candles.length || !candles.every(c =>
-      Number.isFinite(c.open) &&
-      Number.isFinite(c.high) &&
-      Number.isFinite(c.low) &&
-      Number.isFinite(c.close) &&
-      Number.isFinite(c.volume) &&
-      c.high >= c.low
-    )) {
-      console.error('Invalid candles: must be non-empty with valid properties');
-      return;
-    }
-
-    // Create worker
-    workerRef.current = new Worker(new URL('./pattern.worker.ts', import.meta.url), { type: 'module' });
-
-    // Handle messages
-    workerRef.current.onmessage = (event: MessageEvent<WorkerResponse>) => {
-      if (event.data.type === 'success' && event.data.data) {
-        const validResults = event.data.data.filter(result => validatePatternResult(result));
-        setResults(validResults);
-        if (event.data.data.length !== validResults.length) {
-          console.warn('Some PatternResult objects were invalid and filtered out');
-        }
-      } else if (event.data.type === 'error') {
-        console.error(`Pattern worker error: ${event.data.error}`);
+  private setupWorker() {
+    this.worker?.addEventListener('message', (event: MessageEvent) => {
+      if (event.data.type === 'patterns') {
+        this.patterns = event.data.patterns;
+        this.renderer.setIndicator('patterns', new Float32Array(this.patterns.flatMap(p => p.points.flatMap(pt => [pt.index, pt.price]))));
+        this.callbacks.forEach(cb => cb(this.patterns));
       }
-    };
-
-    // Handle errors
-    workerRef.current.onerror = (error: ErrorEvent) => {
-      console.error(`Pattern worker error: ${error.message}`);
-    };
-
-    // Send data to worker
-    workerRef.current.postMessage({
-      command: 'detectPatterns',
-      candles,
-      config,
     });
+  }
 
-    // Cleanup
-    return () => {
-      if (workerRef.current) {
-        workerRef.current.terminate();
-        workerRef.current = null;
-      }
-    };
-  }, [candles, config]);
+  setData(candles: Candle[] | null, ticks: Tick[] | null) {
+    this.worker?.postMessage({
+      type: 'setData',
+      candles: candles || undefined,
+      ticks: ticks || undefined,
+    });
+  }
 
-  return results;
+  onPatterns(callback: (patterns: Pattern[]) => void) {
+    this.callbacks.push(callback);
+  }
+
+  getPatterns(): Pattern[] {
+    return this.patterns;
+  }
+
+  destroy() {
+    this.worker?.terminate();
+    this.worker = null;
+    this.patterns = [];
+    this.callbacks = [];
+  }
 }
-```
