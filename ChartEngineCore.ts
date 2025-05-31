@@ -1,9 +1,8 @@
 // ChartEngineCore.ts
-import { Chart } from 'chart.js';
 import { ChartRenderer } from './ChartRenderer';
 import { ChartEventManager } from './ChartEventManager';
 import { ChartPlugins, ChartPlugin } from './ChartPlugins';
-import { ChartConfig, DrawingTool, DrawingToolState, PriceScaleOptions, TimeScaleOptions, validateChartConfig, mergeChartOptions, Candle } from './ChartTypes';
+import { ChartConfig, DrawingTool, DrawingToolState, PriceScaleOptions, TimeScaleOptions, validateChartConfig, Candle } from './ChartTypes';
 import { DrawingToolManager } from './DrawingToolManager';
 import { throttle } from 'lodash';
 
@@ -14,7 +13,7 @@ import { throttle } from 'lodash';
 interface ChartEngineOptions {
   /** The HTML canvas element to render on */
   canvas: HTMLCanvasElement;
-  /** Whether to attempt GPU rendering (default: true) */
+  /** Whether to attempt GPU rendering (default: false) */
   useGPU?: boolean;
   /** Canvas width in CSS pixels */
   width: number;
@@ -42,7 +41,7 @@ interface PluginContext {
 }
 
 /**
- * Core charting engine for financial charting, managing rendering, events, plugins, and drawing tools.
+ * Core charting engine for custom financial charting, managing rendering, events, plugins, and drawing tools.
  * @class
  */
 export class ChartEngineCore {
@@ -56,7 +55,6 @@ export class ChartEngineCore {
   private height: number;
   private dpr: number;
   private useGPU: boolean;
-  private backend: Chart | null = null;
   private animationFrame: number = 0;
   private isInitialized: boolean = false;
   private isPaused: boolean = false;
@@ -68,6 +66,7 @@ export class ChartEngineCore {
   private timeScale: TimeScaleOptions;
   private currentSymbol: string | null = null;
   private currentTimeframe: string | null = null;
+  private currentConfig: ChartConfig | null = null;
 
   /**
    * Creates a new ChartEngineCore instance.
@@ -84,7 +83,7 @@ export class ChartEngineCore {
     this.width = options.width;
     this.height = options.height;
     this.dpr = options.dpr ?? window.devicePixelRatio ?? 1;
-    this.useGPU = options.useGPU ?? true;
+    this.useGPU = options.useGPU ?? false;
     this.priceScale = options.priceScale ?? { height: this.height, minRangeMargin: 0.1, pixelPerTick: 50, minTicks: 5, maxTicks: 20 };
     this.timeScale = options.timeScale ?? { width: this.width, candleWidth: 10, minCandleWidth: 5, maxCandleWidth: 20, totalCandles: 100 };
     this.context = {
@@ -92,7 +91,7 @@ export class ChartEngineCore {
       getContainer: () => this.canvas.parentElement ?? document.body,
     };
     this.renderer = new ChartRenderer(this.canvas, this.canvas.getContext('2d')!);
-    this.eventManager = new ChartEventManager(this.canvas);
+    this.eventManager = new ChartEventManager(this.canvas, { passive: false });
     this.plugins = new ChartPlugins();
     this.toolManager = new DrawingToolManager(
       this.canvas,
@@ -112,7 +111,7 @@ export class ChartEngineCore {
       this.toolManager.deserializeTools(JSON.stringify(options.tools));
     }
     this.setupGUI();
-    this.setupTouchGestures();
+    this.setupEventListeners();
   }
 
   /**
@@ -155,29 +154,7 @@ export class ChartEngineCore {
         </select>
       `;
       container.appendChild(gui);
-      gui.addEventListener('click', (e) => {
-        const target = e.target as HTMLElement;
-        if (target.id === 'chartMode') {
-          this.setChartMode(true);
-        } else if (target.id === 'drawMode') {
-          this.setChartMode(false);
-        } else if (target.id === 'undo') {
-          this.undo();
-        } else if (target.id === 'redo') {
-          this.redo();
-        }
-      });
-      gui.querySelector('#toolSelect')?.addEventListener('change', (e) => {
-        const tool = (e.target as HTMLSelectElement).value;
-        this.toolManager.setActiveTool(tool || null);
-        this.context.emit?.('toolSelected', { tool });
-      });
-      gui.addEventListener('mouseover', (e) => {
-        const target = e.target as HTMLElement;
-        if (target.tagName === 'BUTTON' || target.tagName === 'SELECT') {
-          target.title = target.getAttribute('aria-label') || '';
-        }
-      });
+      this.updateGUI();
     }
   }
 
@@ -194,34 +171,100 @@ export class ChartEngineCore {
   }
 
   /**
-   * Sets up touch gesture support (pinch-to-zoom, pan).
+   * Sets up event listeners via ChartEventManager.
    * @private
    */
-  private setupTouchGestures(): void {
-    let lastDistance: number | null = null;
-    this.canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 2) {
-        const [touch1, touch2] = e.touches;
-        lastDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
-      }
-    });
-    this.canvas.addEventListener('touchmove', (e) => {
-      if (e.touches.length === 2 && lastDistance !== null) {
-        e.preventDefault();
-        const [touch1, touch2] = e.touches;
-        const newDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
-        const zoomFactor = newDistance / lastDistance;
+  private setupEventListeners(): void {
+    this.eventManager.on('zoom', ({ delta, x }: any) => {
+      if (this.isChartMode) {
+        const zoomFactor = 1 + delta;
         this.timeScale.candleWidth = Math.min(
           this.timeScale.maxCandleWidth,
           Math.max(this.timeScale.minCandleWidth, this.timeScale.candleWidth * zoomFactor)
         );
-        lastDistance = newDistance;
-        this.context.emit?.('zoom', { candleWidth: this.timeScale.candleWidth });
+        this.context.emit?.('zoom', { candleWidth: this.timeScale.candleWidth, x });
         this.render();
       }
     });
-    this.canvas.addEventListener('touchend', () => {
-      lastDistance = null;
+
+    this.eventManager.on('pan', ({ dx }: any) => {
+      if (this.isChartMode) {
+        // Simplified panning: adjust visible candle range
+        this.timeScale.offset = (this.timeScale.offset || 0) + dx / this.timeScale.candleWidth;
+        this.context.emit?.('pan', { dx, offset: this.timeScale.offset });
+        this.render();
+      }
+    });
+
+    this.eventManager.on('click', ({ x, y }: any) => {
+      if (!this.isChartMode) {
+        const index = this.computeUnscaleX(x);
+        const price = this.computeUnscaleY(y);
+        this.toolManager.handleClick({ index, price });
+        this.context.emit?.('toolClicked', { x, y, index, price });
+        this.render();
+      }
+    });
+
+    this.eventManager.on('hover', ({ x, y }: any) => {
+      if (!this.isChartMode) {
+        const index = this.computeUnscaleX(x);
+        const price = this.computeUnscaleY(y);
+        this.toolManager.handleHover({ index, price });
+        this.context.emit?.('toolHovered', { x, y, index, price });
+        this.render();
+      }
+    });
+
+    this.eventManager.on('rightclick', ({ x, y }: any) => {
+      if (!this.isChartMode) {
+        const index = this.computeUnscaleX(x);
+        const price = this.computeUnscaleY(y);
+        this.toolManager.handleContextMenu({ index, price });
+        this.context.emit?.('toolContextMenu', { x, y, index, price });
+        this.render();
+      }
+    });
+
+    // GUI events
+    const container = this.context.getContainer?.();
+    if (container) {
+      container.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.id === 'chartMode') {
+          this.setChartMode(true);
+        } else if (target.id === 'drawMode') {
+          this.setChartMode(false);
+        } else if (target.id === 'undo') {
+          this.undo();
+        } else if (target.id === 'redo') {
+          this.redo();
+        }
+      });
+      container.querySelector('#toolSelect')?.addEventListener('change', (e) => {
+        const tool = (e.target as HTMLSelectElement).value;
+        this.toolManager.setActiveTool(tool || null);
+        this.context.emit?.('toolSelected', { tool });
+      });
+    }
+
+    // Keyboard accessibility
+    this.canvas.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') {
+        this.eventManager.emit('pan', { dx: 10 });
+      } else if (e.key === 'ArrowRight') {
+        this.eventManager.emit('pan', { dx: -10 });
+      } else if (e.key === 'ArrowUp') {
+        this.eventManager.emit('zoom', { delta: 0.1, x: this.width / 2 });
+      } else if (e.key === 'ArrowDown') {
+        this.eventManager.emit('zoom', { delta: -0.1, x: this.width / 2 });
+      } else if (e.key === 'Enter' && !this.isChartMode) {
+        const toolSelect = this.context.getContainer?.().querySelector('#toolSelect') as HTMLSelectElement;
+        if (toolSelect) {
+          this.toolManager.setActiveTool(toolSelect.value || null);
+          this.context.emit?.('toolSelected', { tool: toolSelect.value });
+        }
+      }
     });
   }
 
@@ -230,7 +273,7 @@ export class ChartEngineCore {
    * @private
    */
   private computeScaleX(index: number): number {
-    return index * this.timeScale.candleWidth + this.timeScale.candleWidth / 2;
+    return (index - (this.timeScale.offset || 0)) * this.timeScale.candleWidth + this.timeScale.candleWidth / 2;
   }
 
   /**
@@ -247,7 +290,7 @@ export class ChartEngineCore {
    * @private
    */
   private computeUnscaleX(x: number): number {
-    return Math.round(x / this.timeScale.candleWidth);
+    return Math.round(x / this.timeScale.candleWidth + (this.timeScale.offset || 0));
   }
 
   /**
@@ -271,11 +314,8 @@ export class ChartEngineCore {
 
     this.updateCanvasDimensions();
     try {
-      if (this.useGPU && navigator.gpu) {
-        console.warn('GPU rendering not implemented; falling back to Chart.js');
-        this.backend = new Chart(this.canvas, { type: 'candlestick', data: { datasets: [] } });
-      } else {
-        this.backend = new Chart(this.canvas, { type: 'candlestick', data: { datasets: [] } });
+      if (this.useGPU) {
+        console.warn('GPU rendering not implemented; using 2D canvas');
       }
       if (this.options.config) {
         await this.init(this.options.config);
@@ -285,7 +325,6 @@ export class ChartEngineCore {
       this.startLoop();
       this.context.emit?.('initialized', {});
     } catch (error) {
-      this.backend = null;
       throw new Error(`Initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -319,25 +358,20 @@ export class ChartEngineCore {
   }
 
   /**
-   * Renders the chart and tools using offscreen canvas, respecting isFinal for real-time data.
+   * Renders the chart and tools using offscreen canvas, respecting isFinal.
    * @private
    */
   private render(): void {
-    if (!this.isInitialized || !this.backend) {
-      console.warn('Cannot render: ChartEngineCore not initialized or no backend');
+    if (!this.isInitialized || !this.currentConfig) {
+      console.warn('Cannot render: ChartEngineCore not initialized or no config');
       return;
     }
     try {
-      const config = this.backend.config as ChartConfig;
-      if (config.data?.datasets?.length) {
-        config.data.datasets = config.data.datasets.map(dataset => ({
-          ...dataset,
-          data: (dataset.data as Candle[]).filter(candle => candle.isFinal !== false),
-        }));
-      }
       const ctx = this.offscreenCanvas!.getContext('2d')!;
       ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.renderer.render(config);
+      const candles = this.currentConfig.candles.filter(candle => candle.isFinal !== false);
+      this.renderer.renderCandles(candles, ctx, this.timeScale, this.priceScale);
+      this.toolManager.renderTools(ctx);
       this.canvas.getContext('2d')!.drawImage(this.offscreenCanvas!, 0, 0);
     } catch (error) {
       console.error(`Render failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -387,19 +421,9 @@ export class ChartEngineCore {
         }
       });
       const config: ChartConfig = {
-        type: 'candlestick',
-        data: {
-          datasets: [{
-            label: symbol || 'Candlestick',
-            data: data.candles,
-          }],
-        },
-        options: mergeChartOptions({
-          scales: {
-            x: { type: 'time', time: { unit: 'day' } },
-            y: { type: 'linear' },
-          },
-        }),
+        candles: data.candles,
+        symbol,
+        timeframe,
       };
       if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
         this.currentSymbol = symbol;
@@ -420,17 +444,12 @@ export class ChartEngineCore {
   async init(urlOrConfig: string | ChartConfig): Promise<void> {
     const config = typeof urlOrConfig === 'string' ? await this.fetchData(urlOrConfig) : urlOrConfig;
     validateChartConfig(config);
-    if (config.data?.datasets?.length) {
-      const dataset = config.data.datasets[0];
-      const candles = dataset.data as Candle[];
-      if (candles.length) {
-        this.currentSymbol = candles[0].symbol || dataset.label || null;
-        this.currentTimeframe = candles[0].timeframe || null;
-        this.updateGUI();
-        this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
-      }
-    }
-    this.renderer.render(config);
+    this.currentConfig = config;
+    this.currentSymbol = config.symbol || null;
+    this.currentTimeframe = config.timeframe || null;
+    this.updateGUI();
+    this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
+    this.renderer.renderCandles(config.candles, this.canvas.getContext('2d')!, this.timeScale, this.priceScale);
     this.plugins.initialize();
     this.eventManager.setChartMode(this.isChartMode);
     this.toolManager.setChartMode(this.isChartMode);
@@ -443,21 +462,14 @@ export class ChartEngineCore {
    */
   render(config: ChartConfig): void {
     validateChartConfig(config);
-    if (config.data?.datasets?.length) {
-      const dataset = config.data.datasets[0];
-      const candles = dataset.data as Candle[];
-      if (candles.length) {
-        const symbol = candles[0].symbol || dataset.label || null;
-        const timeframe = candles[0].timeframe || null;
-        if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
-          this.currentSymbol = symbol;
-          this.currentTimeframe = timeframe;
-          this.updateGUI();
-          this.context.emit?.('metadataUpdated', { symbol, timeframe });
-        }
-      }
+    this.currentConfig = config;
+    if (config.symbol !== this.currentSymbol || config.timeframe !== this.currentTimeframe) {
+      this.currentSymbol = config.symbol || null;
+      this.currentTimeframe = config.timeframe || null;
+      this.updateGUI();
+      this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
     }
-    this.renderer.render(config);
+    this.renderer.renderCandles(config.candles, this.canvas.getContext('2d')!, this.timeScale, this.priceScale);
     this.context.emit?.('chartRendered', { config });
   }
 
@@ -467,21 +479,14 @@ export class ChartEngineCore {
    */
   update(config: ChartConfig): void {
     validateChartConfig(config);
-    if (config.data?.datasets?.length) {
-      const dataset = config.data.datasets[0];
-      const candles = dataset.data as Candle[];
-      if (candles.length) {
-        const symbol = candles[0].symbol || dataset.label || null;
-        const timeframe = candles[0].timeframe || null;
-        if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
-          this.currentSymbol = symbol;
-          this.currentTimeframe = timeframe;
-          this.updateGUI();
-          this.context.emit?.('metadataUpdated', { symbol, timeframe });
-        }
-      }
+    this.currentConfig = config;
+    if (config.symbol !== this.currentSymbol || config.timeframe !== this.currentTimeframe) {
+      this.currentSymbol = config.symbol || null;
+      this.currentTimeframe = config.timeframe || null;
+      this.updateGUI();
+      this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
     }
-    this.renderer.update(config);
+    this.renderer.updateCandles(config.candles, this.canvas.getContext('2d')!, this.timeScale, this.priceScale);
     this.context.emit?.('chartUpdated', { config });
   }
 
@@ -500,7 +505,7 @@ export class ChartEngineCore {
    * @param callback Event handler.
    */
   addEventListener(type: string, callback: Function): void {
-    this.eventManager.addEventListener(type, callback);
+    this.eventManager.on(type as any, callback as any);
     this.context.emit?.('eventListenerAdded', { type });
   }
 
@@ -526,7 +531,8 @@ export class ChartEngineCore {
       if (!(options.canvas instanceof HTMLCanvasElement)) throw new Error('Invalid canvas');
       this.canvas = options.canvas;
       this.eventManager.detach();
-      this.eventManager = new ChartEventManager(this.canvas);
+      this.eventManager = new ChartEventManager(this.canvas, { passive: false });
+      this.setupEventListeners();
       needsReinitialize = true;
     }
 
@@ -548,7 +554,7 @@ export class ChartEngineCore {
       needsReinitialize = true;
     }
 
-    if (options.useGPU !== undefined && options.useGPU !== this.useGPU) {
+    if (options.useGPU !== undefined) {
       this.useGPU = options.useGPU;
       needsReinitialize = true;
     }
@@ -568,7 +574,7 @@ export class ChartEngineCore {
       });
     } else if (needsReinitialize) {
       this.updateCanvasDimensions();
-      this.updateGUI(); // Ensure GUI is reattached to new container
+      this.updateGUI();
     }
   }
 
@@ -602,7 +608,7 @@ export class ChartEngineCore {
   serializeState(): string {
     try {
       return JSON.stringify({
-        config: this.backend?.config,
+        config: this.currentConfig,
         tools: this.toolManager.serializeTools(),
         symbol: this.currentSymbol,
         timeframe: this.currentTimeframe,
@@ -670,15 +676,6 @@ export class ChartEngineCore {
     }
 
     try {
-      if (this.backend) {
-        this.backend.destroy();
-        this.backend = null;
-      }
-    } catch (error) {
-      console.warn(`Backend cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-
-    try {
       this.plugins.destroy();
     } catch (error) {
       console.warn(`Plugin cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -700,6 +697,7 @@ export class ChartEngineCore {
     this.isPaused = false;
     this.currentSymbol = null;
     this.currentTimeframe = null;
+    this.currentConfig = null;
     this.context.emit?.('destroyed', {});
   }
 }
