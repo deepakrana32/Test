@@ -1,72 +1,116 @@
-// ChartTypes.ts
 import { Candle } from './Candle';
+
+// Branded type for color to ensure valid hex or RGBA formats
+type Color = string & { __brand: 'Color'; format?: 'hex' | 'rgba' };
 
 /**
  * Options for price scale computation.
+ * @interface
  */
 export interface PriceScaleOptions {
-  height: number; // Canvas height in pixels
-  minRangeMargin: number; // Margin as a fraction of price range
-  pixelPerTick: number; // Pixels per tick for spacing
-  minTicks: number; // Minimum number of ticks
-  maxTicks: number; // Maximum number of ticks
-  formatLabel?: (value: number) => string; // Custom label formatter
+  /** Canvas height in pixels */
+  height: number;
+  /** Margin as a fraction of price range */
+  minRangeMargin: number;
+  /** Pixels per tick for spacing */
+  pixelRatio;
+  /** Minimum number of ticks */
+  minTicks: number;
+  /** Maximum number of ticks */
+  maxTicks: number;
+  /** Custom label formatter for price ticks */
+  formatLabel?: (value: number) => string;
+  /** Pixel ratio for high-DPI displays */
+  pixelRatio?: number;
 }
 
 /**
  * Result of price scale computation.
+ * @interface
  */
 export interface PriceScaleResult {
-  min: number; // Minimum price (with margin)
-  max: number; // Maximum price (with margin)
-  ticks: PriceScaleTick[]; // Price axis ticks
-  scaleY: (price: number) => number; // Maps price to y-coordinate
-  unscaleY: (y: number) => number; // Maps y-coordinate to price
-}
+  /** Minimum price (with margin) */
+  min: number;
+  /** Maximum price (with margin) */
+  max: number;
+  /** Array of price axis ticks */
+  ticks: PriceScaleTick[];
+  /** Maps price to y-coordinate */
+  scaleY: (price: number) => number;
+  /** Maps y-coordinate to price */
+  unscaleY: number;
 
 /**
  * Price axis tick.
+ * @interface
  */
 export interface PriceScaleTick {
-  value: number; // Price value
-  y: number; // Y-coordinate
-  label: string; // Formatted label
+  /** Price value */
+  value: number;
+  /** Y-coordinate */
+  y: number;
+  /** Formatted label */
+  label: string;
+  /** Accessibility label for screen readers */
+  ariaLabel?: string;
 }
 
 /**
  * Options for time scale computation.
+ * @interface
  */
 export interface TimeScaleOptions {
-  width: number; // Canvas width in pixels
-  candleWidth: number; // Base candle width in pixels
-  minCandleWidth: number; // Minimum candle width
-  maxCandleWidth: number; // Maximum candle width
-  totalCandles: number; // Total number of candles
-  formatTimeLabel?: (time: number, index: number, total: number) => string; // Custom time formatter
+  /** Canvas width in pixels */
+  width: number;
+  /** Base candle width in pixels */
+  candleWidth: number;
+  /** Minimum candle width */
+  minCandleWidth: number;
+  /** Maximum candle width in pixels */
+  maxCandleWidth: number;
+  /** Total number of candles */
+  totalCandles: number;
+  /** Custom time formatter for time labels */
+  formatTimeLabel?: (time: number, index: number, total: number) => string;
+  /** Pixel ratio for high-DPI displays */
+  pixelRatio?: number;
 }
 
 /**
  * Result of time scale computation.
+ * @interface
  */
 export interface TimeScaleResult {
-  startIndex: number; // First visible candle index
-  endIndex: number; // Last visible candle index
-  candleWidth: number; // Scaled candle width
-  scaleX: (index: number) => number; // Maps index to x-coordinate
-  unscaleX: (x: number) => number; // Maps x-coordinate to index
-  ticks: TimeScaleTick[]; // Time axis ticks
+  /** First visible candle index */
+  startIndex: number;
+  /** Last visible candle index */
+  endIndex: number;
+  /** Scaled candle width */
+  candleWidth: number;
+  /** Maps index to x-coordinate */
+  scaleX: (index: number) => number;
+  /** Maps x-coordinate to index */
+  unscaleX: (x: number) => number;
+  /** Array of time axis ticks */
+  ticks: TimeScaleTick[];
 }
 
 /**
  * Time axis tick.
+ * @interface
  */
 export interface TimeScaleTick {
-  x: number; // X-coordinate
-  label: string; // Formatted label
+  /** X-coordinate */
+  x: number;
+  /** Formatted label */
+  label: string;
+  /** Accessibility label for screen readers */
+  ariaLabel?: string;
 }
 
 /**
- * Line style options
+ * Line style options.
+ * @enum
  */
 export enum LineStyle {
   Solid = 0,
@@ -75,7 +119,8 @@ export enum LineStyle {
 }
 
 /**
- * Line end style options
+ * Line end style options.
+ * @enum
  */
 export enum LineEnd {
   Normal = 0,
@@ -84,7 +129,8 @@ export enum LineEnd {
 }
 
 /**
- * Horizontal alignment options
+ * Horizontal alignment options.
+ * @enum
  */
 export enum BoxHorizontalAlignment {
   Left = 'left',
@@ -93,7 +139,8 @@ export enum BoxHorizontalAlignment {
 }
 
 /**
- * Vertical alignment options
+ * Vertical alignment options.
+ * @enum
  */
 export enum BoxVerticalAlignment {
   Top = 'top',
@@ -102,57 +149,82 @@ export enum BoxVerticalAlignment {
 }
 
 /**
- * Text font styling options
+ * Text font styling options.
+ * @interface
  */
 export interface TextFontOptions {
-  color: string;
+  /** Font color (hex or RGBA) */
+  color: Color;
+  /** Font size in pixels */
   size: number;
+  /** Bold font weight */
   bold: boolean;
+  /** Italic font style */
   italic: boolean;
+  /** Font family */
   family: string;
 }
 
 /**
- * Text box styling options
+ * Text box styling options.
+ * @interface
  */
 export interface TextBoxOptions {
+  /** Alignment settings */
   alignment: {
     vertical: BoxVerticalAlignment;
     horizontal: BoxHorizontalAlignment;
   };
+  /** Rotation angle in degrees */
   angle: number;
+  /** Scale factor */
   scale: number;
+  /** Padding in pixels */
   padding?: number;
+  /** Background styling */
   background?: {
-    color: string;
+    color: Color;
   };
+  /** Border styling */
   border?: {
-    color: string;
+    color: Color;
     width: number;
     radius: number;
   };
 }
 
 /**
- * Complete text styling options
+ * Complete text styling options.
+ * @interface
  */
 export interface TextOptions {
+  /** Text content */
   value: string;
+  /** Font styling */
   font: TextFontOptions;
+  /** Box styling */
   box: TextBoxOptions;
+  /** Accessibility label */
+  ariaLabel?: string;
 }
 
 /**
- * Line styling options
+ * Line styling options.
+ * @interface
  */
 export interface LineOptions {
-  color: string;
+  /** Line color (hex or RGBA) */
+  color: Color;
+  /** Line width in pixels */
   width: number;
+  /** Line style */
   style: LineStyle;
+  /** Line end styles */
   end: {
     left: LineEnd;
     right: LineEnd;
   };
+  /** Line extension settings */
   extend: {
     left: boolean;
     right: boolean;
@@ -160,54 +232,72 @@ export interface LineOptions {
 }
 
 /**
- * Fill styling options
+ * Fill styling options.
+ * @interface
  */
 export interface FillOptions {
-  color: string;
+  /** Fill color (hex or RGBA) */
+  color: Color;
+  /** Fill opacity (0 to 1) */
   opacity: number;
 }
 
 /**
- * Point coordinate (index/price pair)
+ * Point coordinate (index/price pair).
+ * @interface
  */
 export interface Point {
+  /** Candle index */
   index: number;
+  /** Price value */
   price: number;
 }
 
 /**
- * Trend line drawing tool data
+ * Base drawing tool data with common properties.
+ * @interface
  */
-export interface TrendLineData {
+interface BaseDrawingToolData {
   id: string;
+  type: string;
+  selected?: boolean;
+  editing?: boolean;
+  tooltip?: string;
+  ariaLabel?: string;
+}
+
+/**
+ * Trend line drawing tool data.
+ * @interface
+ */
+export interface TrendLineData extends BaseDrawingToolData {
+  type: 'trendline';
   startIndex: number;
   startPrice: number;
   endIndex: number;
   endPrice: number;
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Rectangle drawing tool data
+ * Rectangle drawing tool data.
+ * @interface
  */
-export interface RectangleData {
-  id: string;
+export interface RectangleData extends BaseDrawingToolData {
+  type: 'rectangle';
   startIndex: number;
   startPrice: number;
   endIndex: number;
   endPrice: number;
   line: LineOptions;
-  fill?: FillOptions;
+  fill: FillOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Fibonacci level definition
+ * Fibonacci level definition.
+ * @interface
  */
 export interface FibonacciLevel {
   price: number;
@@ -216,202 +306,191 @@ export interface FibonacciLevel {
 }
 
 /**
- * Fibonacci retracement drawing tool data
+ * Fibonacci retracement drawing tool data.
+ * @interface
  */
-export interface FibonacciData {
-  id: string;
+export interface FibonacciData extends BaseDrawingToolData {
+  type: 'fibonacci';
   startIndex: number;
   startPrice: number;
   endIndex: number;
   endPrice: number;
   levels: FibonacciLevel[];
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Horizontal line drawing tool data
+ * Horizontal line drawing tool data.
+ * @interface
  */
-export interface HorizontalLineData {
-  id: string;
+export interface HorizontalLineData extends BaseDrawingToolData {
+  type: 'horizontalLine';
   price: number;
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Vertical line drawing tool data
+ * Vertical line drawing tool data.
+ * @interface
  */
-export interface VerticalLineData {
-  id: string;
+export interface VerticalLineData extends BaseDrawingToolData {
+  type: 'verticalLine';
   index: number;
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Arrow drawing tool data
+ * Arrow drawing tool data.
+ * @interface
  */
-export interface ArrowData {
-  id: string;
+export interface ArrowData extends BaseDrawingToolData {
+  type: 'arrow';
   startIndex: number;
   startPrice: number;
   endIndex: number;
   endPrice: number;
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Freehand brush drawing tool data
+ * Freehand brush drawing tool data.
+ * @interface
  */
-export interface BrushData {
-  id: string;
+export interface BrushData extends BaseDrawingToolData {
+  type: 'brush';
   points: Point[];
   line: LineOptions;
-  selected?: boolean;
-  editing?: boolean;
+  text?: TextOptions;
 }
 
 /**
- * Callout/annotation drawing tool data
+ * Callout/annotation drawing tool data.
+ * @interface
  */
-export interface CalloutData {
-  id: string;
+export interface CalloutData extends BaseDrawingToolData {
+  type: 'callout';
   index: number;
   price: number;
   targetIndex: number;
   targetPrice: number;
   text: TextOptions;
   line: LineOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Circle drawing tool data
+ * Circle drawing tool data.
+ * @interface
  */
-export interface CircleData {
-  id: string;
+export interface CircleData extends BaseDrawingToolData {
+  type: 'circle';
   centerIndex: number;
   centerPrice: number;
   radiusIndex: number;
   radiusPrice: number;
   line: LineOptions;
-  fill?: FillOptions;
+  fill: FillOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Extended line drawing tool data
+ * Extended line drawing tool data.
+ * @interface
  */
-export interface ExtendedLineData {
-  id: string;
+export interface ExtendedLineData extends BaseDrawingToolData {
+  type: 'extendedLine';
   startIndex: number;
   startPrice: number;
   endIndex: number;
   endPrice: number;
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Highlighter drawing tool data
+ * Highlighter drawing tool data.
+ * @interface
  */
-export interface HighlighterData {
-  id: string;
+export interface HighlighterData extends BaseDrawingToolData {
+  type: 'highlighter';
   points: Point[];
   line: LineOptions;
-  fill?: FillOptions;
-  selected?: boolean;
-  editing?: boolean;
+  fill: FillOptions;
+  text?: TextOptions;
 }
 
 /**
- * Parallel channel drawing tool data
+ * Parallel channel drawing tool data.
+ * @interface
  */
-export interface ParallelChannelData {
-  id: string;
+export interface ParallelChannelData extends BaseDrawingToolData {
+  type: 'parallelChannel';
   line1StartIndex: number;
   line1StartPrice: number;
   line1EndIndex: number;
   line1EndPrice: number;
   line2OffsetPrice: number;
   line: LineOptions;
-  fill?: FillOptions;
+  fill: FillOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Path drawing tool data
+ * Path drawing tool data.
+ * @interface
  */
-export interface PathData {
-  id: string;
+export interface PathData extends BaseDrawingToolData {
+  type: 'path';
   points: Point[];
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Price range drawing tool data
+ * Price range drawing tool data.
+ * @interface
  */
-export interface PriceRangeData {
-  id: string;
+export interface PriceRangeData extends BaseDrawingToolData {
+  type: 'priceRange';
   startIndex: number;
   endIndex: number;
   topPrice: number;
   bottomPrice: number;
   line: LineOptions;
-  fill?: FillOptions;
+  fill: FillOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Ray drawing tool data
+ * Ray drawing tool data.
+ * @interface
  */
-export interface RayData {
-  id: string;
+export interface RayData extends BaseDrawingToolData {
+  type: 'ray';
   startIndex: number;
   startPrice: number;
   endIndex: number;
   endPrice: number;
   line: LineOptions;
   text?: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Text annotation drawing tool data
+ * Text annotation drawing tool data.
+ * @interface
  */
-export interface TextData {
-  id: string;
+export interface TextData extends BaseDrawingToolData {
+  type: 'text';
   index: number;
   price: number;
   text: TextOptions;
-  selected?: boolean;
-  editing?: boolean;
 }
 
 /**
- * Union type of all drawing tool data types
+ * Union type of all drawing tool data types.
+ * @type
  */
 export type DrawingToolData =
   | TrendLineData
@@ -432,7 +511,8 @@ export type DrawingToolData =
   | TextData;
 
 /**
- * Drawing tool definition with type and data
+ * Drawing tool definition with type and data.
+ * @interface
  */
 export interface DrawingTool {
   type:
@@ -455,3 +535,72 @@ export interface DrawingTool {
   id: string;
   data: DrawingToolData;
 }
+
+/**
+ * Default configuration for drawing tools.
+ * @interface
+ */
+export interface DrawingToolConfig {
+  line?: Partial<LineOptions>;
+  fill?: Partial<FillOptions>;
+  text?: Partial<TextOptions>;
+}
+
+/**
+ * Validation schema for drawing tool data.
+ * @interface
+ */
+export interface DrawingToolValidationSchema {
+  type: DrawingTool['type'];
+  required: (keyof DrawingToolData)[];
+  optional?: (keyof DrawingToolData)[];
+}
+
+/**
+ * State for undo/redo operations.
+ * @interface
+ */
+export interface DrawingToolState {
+  tools: DrawingTool[];
+  timestamp: number;
+}
+
+/**
+ * Tooltip configuration for drawing tools.
+ * @interface
+ */
+export interface DrawingToolTooltip {
+  content: string;
+  position: {
+    x: number;
+    y: number;
+  };
+  style?: {
+    backgroundColor?: Color;
+    textColor?: Color;
+    fontSize?: number;
+  };
+}
+
+/**
+ * Example usage:
+ * ```typescript
+ * const trendLine: DrawingTool = {
+ *   type: 'trendline',
+ *   id: 'uuid-123',
+ *   data: {
+ *     id: 'uuid-123',
+ *     type: 'trendline',
+ *     startIndex: 0,
+ *     startPrice: 100,
+ *     endIndex: 10,
+ *     endPrice: 120,
+ *     line: { color: '#FF0000', width: 2, style: LineStyle.Solid, end: { left: LineEnd.Normal, right: LineEnd.Normal }, extend: { left: false, right: false } },
+ *     text: { value: 'Trend', font: { color: '#000000', size: 12, bold: false, italic: false, family: 'Arial' }, box: { alignment: { vertical: 'middle', horizontal: 'center' }, angle: 0, scale: 1 } },
+ *     selected: false,
+ *     tooltip: 'Trend Line',
+ *     ariaLabel: 'Trend Line Tool'
+ *   }
+ * };
+ * ```
+ */
