@@ -24,6 +24,7 @@ import { ThemeEditor } from './ThemeEditor';
 import { AnalyticsTracker } from './AnalyticsTracker';
 import { DrawingToolManager } from './DrawingToolManager';
 import { PatternRenderer } from './PatternRenderer';
+import { ChartOptions, Candle, Tick } from './ChartTypes';
 
 interface ChartConfig {
   container: HTMLElement;
@@ -75,7 +76,7 @@ export class ChartFactory {
     const priceScaleEngine = new PriceScaleEngine({ height, locale });
     const timeScaleEngine = new TimeScaleEngine({ locale, timezone });
     const crosshairManager = new CrosshairManager(priceScaleEngine, timeScaleEngine, styleManager.getCrosshairParams());
-    
+
     // Initialize kinetic animation
     const kineticAnimation = new KineticAnimation((dx: number) => {
       widget.handleScroll(dx / timeScaleEngine.computeTimeScale().scaleX(1));
@@ -114,20 +115,36 @@ export class ChartFactory {
     const indicatorRenderer = new IndicatorRenderer(drawingToolManager, styleManager, canvas);
     const patternRenderer = new PatternRenderer();
     const patternManager = new PatternManager(patternRenderer);
-    const indicatorConfig = new IndicatorConfig({ addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as IndicatorManager, styleManager);
+    const indicatorConfig = new IndicatorConfig(
+      { addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as any,
+      styleManager
+    );
     const pluginManager = new PluginManager(drawingToolManager, errorHandler);
 
-    const chartState = new ChartState(timeScaleEngine, priceScaleEngine, { addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as IndicatorManager);
+    const chartState = new ChartState(timeScaleEngine, priceScaleEngine, {
+      addIndicator: () => {},
+      removeIndicator: () => {},
+      activeIndicators: [],
+    } as any);
     const exportManager = new ExportManager({ canvas } as ChartWidget, styleManager);
     const chartLayout = new ChartLayout(container, styleManager);
     const themeEditor = new ThemeEditor(styleManager);
 
     // Initialize ChartWidget
+    const chartOptions: Partial<ChartOptions> = {
+      width,
+      height,
+      locale,
+      timezone,
+      priceScale: { height, locale },
+      timeScale: { locale, timezone },
+      crosshair: styleManager.getCrosshairParams(),
+    };
     const widget = new ChartWidget(canvas);
     chartLayout.addChart(widget, crosshairManager, timeScaleEngine);
 
     // Connect data flow
-    dataManager.onData((candles, ticks) => {
+    dataManager.onData((candles: Candle[], ticks: Tick[]) => {
       const validatedCandles = dataValidator.validateCandles(candles);
       const validatedTicks = dataValidator.validateTicks(ticks);
       crosshairManager.setData(validatedCandles, validatedTicks);
@@ -136,7 +153,7 @@ export class ChartFactory {
       analyticsTracker.trackInteraction('data_update');
     });
 
-    chartHistory.onData((candles, ticks) => {
+    chartHistory.onData((candles: Candle[], ticks: Tick[]) => {
       dataManager.setData(candles, ticks);
     });
 
