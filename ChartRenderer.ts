@@ -1,47 +1,44 @@
 // ChartRenderer.ts
+import { ChartPlugin } from './ChartPlugins';
 import { Candle, PriceScaleOptions, TimeScaleOptions } from './ChartTypes';
 
-/**
- * Manages low-level canvas rendering for candlestick charts.
- */
-export class ChartRenderer {
-  private readonly canvas: HTMLCanvasElement;
-  private readonly ctx: CanvasRenderingContext2D;
+export class ChartRendererPlugin implements ChartPlugin {
+  name = 'CandlestickRenderer';
+  priority = -10; // Render before indicators
+  private candles: Candle[] = [];
+  private timeScale: TimeScaleOptions;
+  private priceScale: PriceScaleOptions;
+  private computeScaleX: (index: number) => number;
+  private computeScaleY: (price: number) => number;
 
-  constructor(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) {
-    this.canvas = canvas;
-    this.ctx = ctx;
-  }
-
-  public setCanvasSize(width: number, height: number): void {
-    const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = width * dpr;
-    this.canvas.height = height * dpr;
-    this.canvas.style.width = `${width}px`;
-    this.canvas.style.height = `${height}px`;
-    this.ctx.scale(dpr, dpr);
-  }
-
-  public renderCandles(
+  constructor(
     candles: Candle[],
-    ctx: CanvasRenderingContext2D,
     timeScale: TimeScaleOptions,
     priceScale: PriceScaleOptions,
     computeScaleX: (index: number) => number,
     computeScaleY: (price: number) => number
-  ): void {
+  ) {
+    this.candles = candles;
+    this.timeScale = timeScale;
+    this.priceScale = priceScale;
+    this.computeScaleX = computeScaleX;
+    this.computeScaleY = computeScaleY;
+  }
+
+  updateCandles(candles: Candle[]): void {
+    this.candles = candles;
+  }
+
+  render2D(ctx: CanvasRenderingContext2D): void {
     ctx.save();
-    ctx.clearRect(0, 0, this.canvas.width / (window.devicePixelRatio || 1), this.canvas.height / (window.devicePixelRatio || 1));
+    this.candles.forEach((candle, index) => {
+      const x = this.computeScaleX(index);
+      const openY = this.computeScaleY(candle.open);
+      const closeY = this.computeScaleY(candle.close);
+      const highY = this.computeScaleY(candle.high);
+      const lowY = this.computeScaleY(candle.low);
+      const halfWidth = this.timeScale.candleWidth / 2;
 
-    candles.forEach((candle, index) => {
-      const x = computeScaleX(index);
-      const openY = computeScaleY(candle.open);
-      const closeY = computeScaleY(candle.close);
-      const highY = computeScaleY(candle.high);
-      const lowY = computeScaleY(candle.low);
-      const halfWidth = timeScale.candleWidth / 2;
-
-      // Wick
       ctx.beginPath();
       ctx.moveTo(x, highY);
       ctx.lineTo(x, lowY);
@@ -49,24 +46,15 @@ export class ChartRenderer {
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Body
       ctx.fillStyle = candle.close >= candle.open ? 'green' : 'red';
       const bodyY = candle.close >= candle.open ? closeY : openY;
       const bodyHeight = Math.abs(openY - closeY) || 1;
-      ctx.fillRect(x - halfWidth, bodyY, timeScale.candleWidth, bodyHeight);
+      ctx.fillRect(x - halfWidth, bodyY, this.timeScale.candleWidth, bodyHeight);
     });
-
     ctx.restore();
   }
 
-  public updateCandles(
-    candles: Candle[],
-    ctx: CanvasRenderingContext2D,
-    timeScale: TimeScaleOptions,
-    priceScale: PriceScaleOptions,
-    computeScaleX: (index: number) => number,
-    computeScaleY: (price: number) => number
-  ): void {
-    this.renderCandles(candles, ctx, timeScale, priceScale, computeScaleX, computeScaleY);
+  renderGPU(): void {
+    // Optional GPU rendering
   }
 }
