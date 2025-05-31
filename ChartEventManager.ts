@@ -1,4 +1,3 @@
-```typescript
 // ChartEventManager.ts
 
 // Interface for event configuration options
@@ -31,18 +30,34 @@ interface ClickEvent {
   y: number;
 }
 
+// Interface for hover event data
+interface HoverEvent {
+  /** X-coordinate in canvas space */
+  x: number;
+  /** Y-coordinate in canvas space */
+  y: number;
+}
+
+// Interface for right-click event data
+interface RightClickEvent {
+  /** X-coordinate in canvas space */
+  x: number;
+  /** Y-coordinate in canvas space */
+  y: number;
+}
+
 // Union type for all possible event data
-type ChartEventData = ZoomEvent | PanEvent | ClickEvent;
+type ChartEventData = ZoomEvent | PanEvent | ClickEvent | HoverEvent | RightClickEvent;
 
 // Type for event handlers
 type ChartEventHandler = (data: ChartEventData) => void;
 
 // Supported event types
-type ChartEventType = 'zoom' | 'pan' | 'click';
+type ChartEventType = 'zoom' | 'pan' | 'click' | 'hover' | 'rightclick';
 
 /**
- * Manages user input events (mouse, touch, wheel) for a chart canvas.
- * Emits custom events (e.g., zoom, pan, click) to registered handlers.
+ * Manages user input events (mouse, touch, wheel, keyboard) for a chart canvas.
+ * Emits custom events (e.g., zoom, pan, click, hover, rightclick) to registered handlers.
  */
 export class ChartEventManager {
   private readonly canvas: HTMLCanvasElement;
@@ -52,15 +67,18 @@ export class ChartEventManager {
   private isDragging: boolean = false;
   private lastX: number = 0;
   private lastTouchTime: number = 0;
+  private isChartMode: boolean = true;
   private readonly handlers: {
     wheel: (e: WheelEvent) => void;
     mouseDown: (e: MouseEvent) => void;
     mouseMove: (e: MouseEvent) => void;
     mouseUp: (e: MouseEvent) => void;
     click: (e: MouseEvent) => void;
+    contextMenu: (e: MouseEvent) => void;
     touchStart: (e: TouchEvent) => void;
     touchMove: (e: TouchEvent) => void;
     touchEnd: (e: TouchEvent) => void;
+    keydown: (e: KeyboardEvent) => void;
   };
 
   /**
@@ -80,16 +98,17 @@ export class ChartEventManager {
       capture: config.capture ?? false,
     };
 
-    // Bind event handlers to avoid recreating functions
     this.handlers = {
       wheel: this.onWheel.bind(this),
       mouseDown: this.onMouseDown.bind(this),
       mouseMove: this.onMouseMove.bind(this),
       mouseUp: this.onMouseUp.bind(this),
       click: this.onClick.bind(this),
+      contextMenu: this.onContextMenu.bind(this),
       touchStart: this.onTouchStart.bind(this),
       touchMove: this.onTouchMove.bind(this),
       touchEnd: this.onTouchEnd.bind(this),
+      keydown: this.onKeydown.bind(this),
     };
 
     this.attach();
@@ -110,21 +129,31 @@ export class ChartEventManager {
     this.canvas.addEventListener('mousemove', this.handlers.mouseMove, { passive: passive ?? true, capture });
     this.canvas.addEventListener('mouseup', this.handlers.mouseUp, { passive: passive ?? true, capture });
     this.canvas.addEventListener('click', this.handlers.click, { passive: passive ?? true, capture });
+    this.canvas.addEventListener('contextmenu', this.handlers.contextMenu, { passive: passive ?? true, capture });
     this.canvas.addEventListener('touchstart', this.handlers.touchStart, { passive: passive ?? false, capture });
     this.canvas.addEventListener('touchmove', this.handlers.touchMove, { passive: passive ?? false, capture });
     this.canvas.addEventListener('touchend', this.handlers.touchEnd, { passive: passive ?? true, capture });
+    this.canvas.addEventListener('keydown', this.handlers.keydown, { passive: passive ?? true, capture });
 
     this.isAttached = true;
   }
 
   /**
+   * Sets chart or draw mode to control event emission.
+   * @param isChartMode True for chart mode, false for draw mode.
+   */
+  public setChartMode(isChartMode: boolean): void {
+    this.isChartMode = isChartMode;
+  }
+
+  /**
    * Registers a handler for a specific event type.
-   * @param event The event type (e.g., 'zoom', 'pan', 'click').
+   * @param event The event type (e.g., 'zoom', 'pan', 'click', 'hover', 'rightclick').
    * @param handler The handler function to call when the event is emitted.
    * @throws Error if event or handler is invalid.
    */
   public on(event: ChartEventType, handler: ChartEventHandler): void {
-    if (!['zoom', 'pan', 'click'].includes(event)) {
+    if (!['zoom', 'pan', 'click', 'hover', 'rightclick'].includes(event)) {
       throw new Error(`Invalid event type: ${event}`);
     }
     if (typeof handler !== 'function') {
@@ -152,11 +181,17 @@ export class ChartEventManager {
   }
 
   /**
-   * Emits an event to all registered handlers.
+   * Emits an event to all registered handlers, respecting chart mode.
    * @param event The event type.
    * @param data The event data.
    */
   public emit(event: ChartEventType, data: ChartEventData): void {
+    if ((event === 'click' || event === 'hover' || event === 'rightclick') && this.isChartMode) {
+      return; // Skip tool events in chart mode
+    }
+    if ((event === 'zoom' || event === 'pan') && !this.isChartMode) {
+      return; // Skip chart events in draw mode
+    }
     if (this.listeners[event]) {
       this.listeners[event]!.forEach(handler => {
         try {
@@ -182,9 +217,11 @@ export class ChartEventManager {
     this.canvas.removeEventListener('mousemove', this.handlers.mouseMove, { passive: passive ?? true, capture });
     this.canvas.removeEventListener('mouseup', this.handlers.mouseUp, { passive: passive ?? true, capture });
     this.canvas.removeEventListener('click', this.handlers.click, { passive: passive ?? true, capture });
+    this.canvas.removeEventListener('contextmenu', this.handlers.contextMenu, { passive: passive ?? true, capture });
     this.canvas.removeEventListener('touchstart', this.handlers.touchStart, { passive: passive ?? false, capture });
     this.canvas.removeEventListener('touchmove', this.handlers.touchMove, { passive: passive ?? false, capture });
     this.canvas.removeEventListener('touchend', this.handlers.touchEnd, { passive: passive ?? true, capture });
+    this.canvas.removeEventListener('keydown', this.handlers.keydown, { passive: passive ?? true, capture });
 
     this.listeners = {};
     this.isDragging = false;
@@ -221,6 +258,9 @@ export class ChartEventManager {
   }
 
   private onMouseMove(event: MouseEvent): void {
+    const [x, y] = this.getCanvasCoordinates(event.clientX, event.clientY);
+    this.emit('hover', { x, y });
+
     if (!this.isDragging) return;
 
     const delta = event.clientX - this.lastX;
@@ -237,6 +277,12 @@ export class ChartEventManager {
   private onClick(event: MouseEvent): void {
     const [x, y] = this.getCanvasCoordinates(event.clientX, event.clientY);
     this.emit('click', { x, y });
+  }
+
+  private onContextMenu(event: MouseEvent): void {
+    event.preventDefault();
+    const [x, y] = this.getCanvasCoordinates(event.clientX, event.clientY);
+    this.emit('rightclick', { x, y });
   }
 
   private onTouchStart(event: TouchEvent): void {
@@ -256,6 +302,9 @@ export class ChartEventManager {
 
     if (event.touches.length === 1) {
       const touch = event.touches[0];
+      const [x, y] = this.getCanvasCoordinates(touch.clientX, touch.clientY);
+      this.emit('hover', { x, y });
+
       const dx = touch.clientX - this.lastX;
       if (Math.abs(dx) > 0) {
         this.emit('pan', { dx: -dx });
@@ -276,5 +325,16 @@ export class ChartEventManager {
     this.lastX = 0;
     this.lastTouchTime = 0;
   }
+
+  private onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'ArrowLeft') {
+      this.emit('pan', { dx: 10 });
+    } else if (event.key === 'ArrowRight') {
+      this.emit('pan', { dx: -10 });
+    } else if (event.key === 'ArrowUp') {
+      this.emit('zoom', { delta: 0.1, x: this.canvas.width / 2 });
+    } else if (event.key === 'ArrowDown') {
+      this.emit('zoom', { delta: -0.1, x: this.canvas.width / 2 });
+    }
+  }
 }
-```
