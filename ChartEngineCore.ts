@@ -66,6 +66,8 @@ export class ChartEngineCore {
   private offscreenCanvas: OffscreenCanvas | null = null;
   private priceScale: PriceScaleOptions;
   private timeScale: TimeScaleOptions;
+  private currentSymbol: string | null = null;
+  private currentTimeframe: string | null = null;
 
   /**
    * Creates a new ChartEngineCore instance.
@@ -114,7 +116,7 @@ export class ChartEngineCore {
   }
 
   /**
-   * Sets up the GUI toolbar for chart controls.
+   * Sets up the GUI toolbar for chart controls, including symbol and timeframe display.
    * @private
    */
   private setupGUI(): void {
@@ -125,6 +127,9 @@ export class ChartEngineCore {
       gui.setAttribute('aria-label', 'Chart Controls');
       gui.style.cssText = 'position: absolute; top: 10px; left: 10px; background: #fff; padding: 5px; border: 1px solid #ccc;';
       gui.innerHTML = `
+        <div id="chartInfo" style="margin-bottom: 5px;" aria-label="Chart Information">
+          ${this.currentSymbol || 'Unknown Symbol'} ${this.currentTimeframe || 'Unknown Timeframe'}
+        </div>
         <button id="chartMode" aria-label="Click to switch to Chart Mode">Chart Mode</button>
         <button id="drawMode" aria-label="Click to switch to Drawing Mode">Draw Mode</button>
         <button id="undo" aria-label="Click to undo last action">Undo</button>
@@ -173,6 +178,18 @@ export class ChartEngineCore {
           target.title = target.getAttribute('aria-label') || '';
         }
       });
+    }
+  }
+
+  /**
+   * Updates the GUI to reflect current symbol and timeframe.
+   * @private
+   */
+  private updateGUI(): void {
+    const chartInfo = this.context.getContainer?.().querySelector('#chartInfo') as HTMLElement;
+    if (chartInfo) {
+      chartInfo.textContent = `${this.currentSymbol || 'Unknown Symbol'} ${this.currentTimeframe || 'Unknown Timeframe'}`;
+      chartInfo.setAttribute('aria-label', `Chart Information: ${chartInfo.textContent}`);
     }
   }
 
@@ -302,7 +319,7 @@ export class ChartEngineCore {
   }
 
   /**
-   * Renders the chart and tools using offscreen canvas.
+   * Renders the chart and tools using offscreen canvas, respecting isFinal for real-time data.
    * @private
    */
   private render(): void {
@@ -311,9 +328,16 @@ export class ChartEngineCore {
       return;
     }
     try {
+      const config = this.backend.config as ChartConfig;
+      if (config.data?.datasets?.length) {
+        config.data.datasets = config.data.datasets.map(dataset => ({
+          ...dataset,
+          data: (dataset.data as Candle[]).filter(candle => candle.isFinal !== false),
+        }));
+      }
       const ctx = this.offscreenCanvas!.getContext('2d')!;
       ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.renderer.render(this.backend.config as ChartConfig);
+      this.renderer.render(config);
       this.canvas.getContext('2d')!.drawImage(this.offscreenCanvas!, 0, 0);
     } catch (error) {
       console.error(`Render failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -325,7 +349,7 @@ export class ChartEngineCore {
    * @private
    */
   private validateCandle(candle: Candle): void {
-    const { open, high, low, close, volume, time } = candle;
+    const { open, high, low, close, volume, time, symbol, timeframe, isFinal } = candle;
     if (!Number.isFinite(open) || open < 0) throw new Error('Invalid open price');
     if (!Number.isFinite(high) || high < 0) throw new Error('Invalid high price');
     if (!Number.isFinite(low) || low < 0) throw new Error('Invalid low price');
@@ -335,10 +359,13 @@ export class ChartEngineCore {
     if (low > high) throw new Error('Low price cannot exceed high price');
     if (open < low || open > high) throw new Error('Open price must be between low and high');
     if (close < low || close > high) throw new Error('Close price must be between low and high');
+    if (symbol !== undefined && typeof symbol !== 'string') throw new Error('Invalid symbol: must be a string');
+    if (timeframe !== undefined && typeof timeframe !== 'string') throw new Error('Invalid timeframe: must be a string');
+    if (isFinal !== undefined && typeof isFinal !== 'boolean') throw new Error('Invalid isFinal: must be a boolean');
   }
 
   /**
-   * Fetches chart data from a URL.
+   * Fetches chart data from a URL and updates symbol/timeframe.
    * @param url Data endpoint.
    * @returns Chart configuration.
    */
@@ -348,18 +375,22 @@ export class ChartEngineCore {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       if (!Array.isArray(data.candles)) throw new Error('Invalid data: candles must be an array');
+      let symbol: string | null = null;
+      let timeframe: string | null = null;
       data.candles.forEach((candle: Candle, index: number) => {
         try {
           this.validateCandle(candle);
+          if (candle.symbol && !symbol) symbol = candle.symbol;
+          if (candle.timeframe && !timeframe) timeframe = candle.timeframe;
         } catch (error) {
           throw new Error(`Invalid candle at index ${index}: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
       });
-      return {
+      const config: ChartConfig = {
         type: 'candlestick',
         data: {
           datasets: [{
-            label: 'Candlestick',
+            label: symbol || 'Candlestick',
             data: data.candles,
           }],
         },
@@ -370,6 +401,13 @@ export class ChartEngineCore {
           },
         }),
       };
+      if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
+        this.currentSymbol = symbol;
+        this.currentTimeframe = timeframe;
+        this.updateGUI();
+        this.context.emit?.('metadataUpdated', { symbol, timeframe });
+      }
+      return config;
     } catch (error) {
       throw new Error(`Failed to fetch chart data: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -382,6 +420,16 @@ export class ChartEngineCore {
   async init(urlOrConfig: string | ChartConfig): Promise<void> {
     const config = typeof urlOrConfig === 'string' ? await this.fetchData(urlOrConfig) : urlOrConfig;
     validateChartConfig(config);
+    if (config.data?.datasets?.length) {
+      const dataset = config.data.datasets[0];
+      const candles = dataset.data as Candle[];
+      if (candles.length) {
+        this.currentSymbol = candles[0].symbol || dataset.label || null;
+        this.currentTimeframe = candles[0].timeframe || null;
+        this.updateGUI();
+        this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
+      }
+    }
     this.renderer.render(config);
     this.plugins.initialize();
     this.eventManager.setChartMode(this.isChartMode);
@@ -395,6 +443,20 @@ export class ChartEngineCore {
    */
   render(config: ChartConfig): void {
     validateChartConfig(config);
+    if (config.data?.datasets?.length) {
+      const dataset = config.data.datasets[0];
+      const candles = dataset.data as Candle[];
+      if (candles.length) {
+        const symbol = candles[0].symbol || dataset.label || null;
+        const timeframe = candles[0].timeframe || null;
+        if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
+          this.currentSymbol = symbol;
+          this.currentTimeframe = timeframe;
+          this.updateGUI();
+          this.context.emit?.('metadataUpdated', { symbol, timeframe });
+        }
+      }
+    }
     this.renderer.render(config);
     this.context.emit?.('chartRendered', { config });
   }
@@ -405,6 +467,20 @@ export class ChartEngineCore {
    */
   update(config: ChartConfig): void {
     validateChartConfig(config);
+    if (config.data?.datasets?.length) {
+      const dataset = config.data.datasets[0];
+      const candles = dataset.data as Candle[];
+      if (candles.length) {
+        const symbol = candles[0].symbol || dataset.label || null;
+        const timeframe = candles[0].timeframe || null;
+        if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
+          this.currentSymbol = symbol;
+          this.currentTimeframe = timeframe;
+          this.updateGUI();
+          this.context.emit?.('metadataUpdated', { symbol, timeframe });
+        }
+      }
+    }
     this.renderer.update(config);
     this.context.emit?.('chartUpdated', { config });
   }
@@ -492,6 +568,7 @@ export class ChartEngineCore {
       });
     } else if (needsReinitialize) {
       this.updateCanvasDimensions();
+      this.updateGUI(); // Ensure GUI is reattached to new container
     }
   }
 
@@ -527,6 +604,8 @@ export class ChartEngineCore {
       return JSON.stringify({
         config: this.backend?.config,
         tools: this.toolManager.serializeTools(),
+        symbol: this.currentSymbol,
+        timeframe: this.currentTimeframe,
       });
     } catch (error) {
       console.error('Serialization failed:', error);
@@ -540,14 +619,20 @@ export class ChartEngineCore {
    */
   deserializeState(state: string): void {
     try {
-      const { config, tools } = JSON.parse(state);
+      const { config, tools, symbol, timeframe } = JSON.parse(state);
       if (config) {
         this.render(config);
       }
       if (tools) {
         this.toolManager.deserializeTools(tools);
       }
-      this.context.emit?.('stateRestored', { config, tools });
+      if (symbol || timeframe) {
+        this.currentSymbol = symbol || null;
+        this.currentTimeframe = timeframe || null;
+        this.updateGUI();
+        this.context.emit?.('metadataUpdated', { symbol, timeframe });
+      }
+      this.context.emit?.('stateRestored', { config, tools, symbol, timeframe });
     } catch (error) {
       console.error('Deserialization failed:', error);
     }
@@ -605,11 +690,16 @@ export class ChartEngineCore {
       console.warn(`Tool manager cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
 
+    const gui = this.context.getContainer?.().querySelector('[role="toolbar"]');
+    if (gui) gui.remove();
+
     this.canvas.width = 0;
     this.canvas.height = 0;
     this.offscreenCanvas = null;
     this.isInitialized = false;
     this.isPaused = false;
+    this.currentSymbol = null;
+    this.currentTimeframe = null;
     this.context.emit?.('destroyed', {});
   }
 }
