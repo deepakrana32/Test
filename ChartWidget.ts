@@ -1,4 +1,3 @@
-import { ChartPlugins } from './ChartPlugins';
 import { ChartEventManager, ChartEventType } from './ChartEventManager';
 import { CrosshairManager } from './CrosshairManager';
 import { PaneWidget } from './PaneWidget';
@@ -9,23 +8,25 @@ import { TimeScaleEngine } from './TimeScaleEngine';
 import { ChartRenderer } from './ChartRenderer';
 import { DrawingToolManager } from './DrawingToolManager';
 import { KineticAnimation } from './KineticAnimation';
+import { StyleManager } from './StyleManager';
+import { LocalizationManager } from './LocalizationManager';
+import { ErrorHandler } from './ErrorHandler';
 import { Candle, Tick, CrosshairParams, ChartOptions } from './ChartTypes';
 
 export class ChartWidget {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private gl: WebGL2RenderingContext | null;
-  private plugins: ChartPlugins;
   private eventManager: ChartEventManager;
   private crosshairManager: CrosshairManager;
   private priceScale: PriceScaleEngine;
   private timeScale: TimeScaleEngine;
   private renderer: ChartRenderer;
   private drawingToolManager: DrawingToolManager;
+  private kineticAnimation: KineticAnimation;
   private panes: PaneWidget[];
   private priceAxis: PriceAxisWidget;
   private timeAxis: TimeAxisWidget;
-  private kineticAnimation: KineticAnimation;
   private options: ChartOptions;
   private candles: Candle[] | null;
   private ticks: Tick[] | null;
@@ -34,6 +35,11 @@ export class ChartWidget {
 
   constructor(
     canvas: HTMLCanvasElement,
+    styleManager: StyleManager,
+    localizationManager: LocalizationManager,
+    errorHandler: ErrorHandler,
+    drawingToolManager: DrawingToolManager,
+    kineticAnimation: KineticAnimation,
     options: Partial<ChartOptions> = {}
   ) {
     if (!canvas) throw new Error('Canvas is required');
@@ -41,10 +47,10 @@ export class ChartWidget {
     this.ctx = canvas.getContext('2d')!;
     this.gl = canvas.getContext('webgl2');
     this.options = {
-      width: canvas.width,
-      height: canvas.height,
-      locale: 'en-US',
-      timezone: 'UTC',
+      width: canvas.width / devicePixelRatio,
+      height: canvas.height / devicePixelRatio,
+      locale: 'en-IN',
+      timezone: 'Asia/Kolkata',
       ...options,
     };
     this.canvas.width = this.options.width * devicePixelRatio;
@@ -52,52 +58,26 @@ export class ChartWidget {
     this.canvas.style.width = `${this.options.width}px`;
     this.canvas.style.height = `${this.options.height}px`;
 
-    this.plugins = new ChartPlugins();
     this.eventManager = new ChartEventManager(this.canvas);
-    this.priceScale = new PriceScaleEngine();
-    this.timeScale = new TimeScaleEngine();
+    this.priceScale = new PriceScaleEngine(this.options.priceScale);
+    this.timeScale = new TimeScaleEngine(this.options.timeScale);
     this.renderer = new ChartRenderer(this.canvas, this.ctx, this.gl);
     this.crosshairManager = new CrosshairManager(
-      this.canvas,
-      this,
-      this.eventManager,
       this.priceScale,
       this.timeScale,
-      this.options.crosshair
+      styleManager.getCrosshairParams()
     );
-    this.drawingToolManager = new DrawingToolManager(
-      this.canvas,
-      this.ctx,
-      this.gl,
-      this,
-      this.crosshairManager,
-      (tools) => this.renderer.setDrawingTools(tools),
-      this.timeScale.scaleX,
-      this.priceScale.scaleY,
-      this.timeScale.unscaleX,
-      this.priceScale.unscaleY,
-      (time) => this.timeScale.timeToIndex(time)
-    );
+    this.drawingToolManager = drawingToolManager;
+    this.kineticAnimation = kineticAnimation;
     this.panes = [new PaneWidget(this.canvas, this.ctx, this.gl, this, this.priceScale, this.timeScale)];
     this.priceAxis = new PriceAxisWidget(this.canvas, this.ctx, this.gl, this, this.priceScale);
     this.timeAxis = new TimeAxisWidget(this.canvas, this.ctx, this.gl, this, this.timeScale);
-    this.kineticAnimation = new KineticAnimation((dx) => this.handleScroll(dx));
     this.candles = null;
     this.ticks = null;
     this.needsRender = false;
     this.animationFrameId = null;
 
     this.setupEventListeners();
-    this.initializePlugins();
-  }
-
-  private async initializePlugins() {
-    if (this.gl) {
-      this.plugins.initializeWebGL(this.gl);
-    } else {
-      await this.plugins.initializeGPU(this.renderer.getGPUDevice());
-    }
-    this.plugins.initialize2D(this.ctx);
   }
 
   private setupEventListeners() {
@@ -172,16 +152,13 @@ export class ChartWidget {
     // Render crosshair
     this.crosshairManager.render(this.ctx);
 
-    // Render plugins
+    // Render drawing tools
+    this.drawingToolManager.render2D(this.ctx, this.options.width, this.options.height);
     if (this.gl) {
-      this.plugins.renderWebGL(this.gl);
-    } else {
-      this.plugins.renderGPU(this.renderer.getGPURenderPass());
+      this.drawingToolManager.renderWebGL(this.gl);
     }
-    this.plugins.render2D(this.ctx);
 
     this.ctx.restore();
-    this.plugins.onAnimationFrame(performance.now(), 16.67); // ~60 FPS
   }
 
   addPane(): PaneWidget {
@@ -204,7 +181,7 @@ export class ChartWidget {
     screenshotCanvas.width = this.canvas.width;
     screenshotCanvas.height = this.canvas.height;
     const ctx = screenshotCanvas.getContext('2d')!;
-    this.plugins.renderScreenshot(ctx, this.options.width, this.options.height);
+    ctx.drawImage(this.canvas, 0, 0);
     return screenshotCanvas;
   }
 
@@ -213,11 +190,10 @@ export class ChartWidget {
     this.eventManager.destroy();
     this.crosshairManager.destroy();
     this.drawingToolManager.destroy();
+    this.kineticAnimation.destroy();
     this.panes.forEach(pane => pane.destroy());
     this.priceAxis.destroy();
     this.timeAxis.destroy();
-    this.kineticAnimation.destroy();
-    this.plugins.destroy();
     this.canvas.removeEventListener('resize', this.handleResize);
   }
 }
