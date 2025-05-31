@@ -1,183 +1,152 @@
-```typescript
-// TimeScaleEngine.ts
-// Computes time axis scaling and handles zoom/scroll interactions for financial charts
+import { TimeScaleOptions, TimeScaleResult, TimeScaleTick } from './ChartTypes';
+import { KineticAnimation } from './KineticAnimation';
+import { debounce } from 'lodash';
 
-import { TimeScaleOptions, TimeScaleResult, TimeScaleTick } from '@/types/ChartTypes';
+export class TimeScaleEngine {
+  private times: number[];
+  private options: TimeScaleOptions;
+  private visibleStart: number;
+  private visibleEnd: number;
+  private candleWidth: number;
+  private kineticAnimation: KineticAnimation;
+  private listeners: (() => void)[];
+  private linkedEngines: TimeScaleEngine[];
 
-/**
- * Default time scale options.
- */
-const DEFAULT_OPTS: Partial<TimeScaleOptions> = {
-  minCandleWidth: 2,
-  maxCandleWidth: 40,
-};
-
-/**
- * Formats a time tick label based on a Unix timestamp.
- * @param time Unix timestamp in milliseconds.
- * @param index Candle index.
- * @param total Total number of candles.
- * @returns Formatted time label.
- */
-function formatTimeTick(time: number, index: number, total: number): string {
-  const date = new Date(time);
-  if (total > 1000) return date.toLocaleDateString(); // Daily for large datasets
-  if (total > 100) return `${date.getHours()}:00`; // Hourly
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); // Minute
-}
-
-/**
- * Computes time axis scaling based on scroll and zoom.
- * @param scrollOffset Scroll offset in candle indices.
- * @param zoomFactor Zoom factor for candle width.
- * @param opts Time scale options.
- * @param times Array of candle timestamps (optional for accurate tick labels).
- * @returns Time scale result with ticks and scaling functions.
- */
-export function computeTimeScale(
-  scrollOffset: number,
-  zoomFactor: number,
-  opts: TimeScaleOptions,
-  times: number[] = []
-): TimeScaleResult {
-  const config: TimeScaleOptions = { ...DEFAULT_OPTS, ...opts };
-
-  // Validate inputs
-  if (
-    !Number.isFinite(config.width) ||
-    config.width <= 0 ||
-    !Number.isFinite(config.candleWidth) ||
-    config.candleWidth <= 0 ||
-    !Number.isFinite(config.totalCandles) ||
-    config.totalCandles < 0 ||
-    !Number.isFinite(scrollOffset) ||
-    !Number.isFinite(zoomFactor) ||
-    zoomFactor <= 0
-  ) {
-    return {
-      startIndex: 0,
-      endIndex: 0,
-      candleWidth: config.candleWidth,
-      scaleX: () => 0,
-      unscaleX: () => 0,
-      ticks: [],
+  constructor(options: Partial<TimeScaleOptions> = {}) {
+    this.times = [];
+    this.options = {
+      minCandleWidth: 2,
+      maxCandleWidth: 20,
+      timezone: 'UTC',
+      locale: 'en-US',
+      optimalHeight: 40,
+      ...options,
     };
+    this.visibleStart = 0;
+    this.visibleEnd = 100;
+    this.candleWidth = 10;
+    this.kineticAnimation = new KineticAnimation((dx) => this.scroll(dx));
+    this.listeners = [];
+    this.linkedEngines = [];
+    this.setupZoomHandler();
   }
 
-  const scaledCandleWidth = Math.min(
-    config.maxCandleWidth,
-    Math.max(config.minCandleWidth, config.candleWidth * zoomFactor)
-  );
+  private setupZoomHandler() {
+    this.zoomAt = debounce(this.zoomAt.bind(this), 16); // ~60 FPS
+  }
 
-  const visibleCount = Math.floor(config.width / scaledCandleWidth);
-  const startIndex = Math.max(0, Math.floor(scrollOffset));
-  const endIndex = Math.min(startIndex + visibleCount, config.totalCandles);
+  setData(times: number[]) {
+    this.times = times.filter(t => Number.isFinite(t)).sort((a, b) => a - b);
+    if (this.times.length === 0) return;
+    this.visibleStart = Math.max(0, this.times.length - 100);
+    this.visibleEnd = this.times.length;
+    this.adjustCandleWidth();
+    this.notifyListeners();
+  }
 
-  const scaleX = (i: number) => (i - startIndex) * scaledCandleWidth;
-  const unscaleX = (x: number) => x / scaledCandleWidth + startIndex;
+  setOptions(options: Partial<TimeScaleOptions>) {
+    this.options = { ...this.options, ...options };
+    this.adjustCandleWidth();
+    this.notifyListeners();
+  }
 
-  // Tick generation
-  const tickEvery = Math.max(1, Math.ceil(60 / (scaledCandleWidth + 0.1)));
-  const ticks: TimeScaleTick[] = [];
-  for (let i = startIndex; i <= endIndex; i += tickEvery) {
-    const time = times[i] ?? i * 1000; // Fallback to index-based time
-    ticks.push({
-      x: scaleX(i),
-      label: config.formatTimeLabel
-        ? config.formatTimeLabel(time, i, config.totalCandles)
-        : formatTimeTick(time, i, config.totalCandles),
+  scroll(dx: number) {
+    const deltaIndex = dx / this.candleWidth;
+    this.visibleStart = Math.max(0, Math.min(this.times.length - (this.visibleEnd - this.visibleStart), this.visibleStart - deltaIndex));
+    this.visibleEnd = this.visibleStart + (this.visibleEnd - this.visibleStart);
+    this.notifyListeners();
+    this.linkedEngines.forEach(engine => {
+      engine.scroll(dx);
     });
   }
 
-  return {
-    startIndex,
-    endIndex,
-    candleWidth: scaledCandleWidth,
-    scaleX,
-    unscaleX,
-    ticks,
-  };
-}
+  zoomAt(x: number, delta: number) {
+    this.candleWidth *= delta;
+    this.candleWidth = Math.max(this.options.minCandleWidth, Math.min(this.options.maxCandleWidth, this.candleWidth));
+    const index = this.unscaleX(x);
+    const visibleCount = this.visibleEnd - this.visibleStart;
+    const newCount = visibleCount / delta;
+    this.visibleStart = index - (x / this.candleWidth) * newCount;
+    this.visibleEnd = this.visibleStart + newCount;
+    this.visibleStart = Math.max(0, Math.min(this.times.length - newCount, this.visibleStart));
+    this.visibleEnd = this.visibleStart + newCount;
+    this.notifyListeners();
+    this.linkedEngines.forEach(engine => {
+      engine.zoomAt(x, delta);
+    });
+  }
 
-/**
- * Controller for managing time axis zoom and scroll.
- */
-export class TimeZoomController {
-  private zoomFactor = 1;
-  private scrollOffset = 0;
-
-  constructor(private opts: TimeScaleOptions) {
-    // Validate options
-    if (
-      !Number.isFinite(opts.width) ||
-      opts.width <= 0 ||
-      !Number.isFinite(opts.candleWidth) ||
-      opts.candleWidth <= 0 ||
-      !Number.isFinite(opts.totalCandles) ||
-      opts.totalCandles < 0 ||
-      !Number.isFinite(opts.minCandleWidth) ||
-      !Number.isFinite(opts.maxCandleWidth)
-    ) {
-      throw new Error('Invalid TimeScaleOptions');
+  link(engine: TimeScaleEngine) {
+    if (!this.linkedEngines.includes(engine)) {
+      this.linkedEngines.push(engine);
+      engine.link(this); // Bidirectional sync
     }
   }
 
-  /**
-   * Zooms in at the specified x-coordinate.
-   * @param centerX X-coordinate of zoom center.
-   */
-  zoomIn(centerX: number): void {
-    this.zoom(centerX, 1.15);
-  }
+  computeTimeScale(): TimeScaleResult | null {
+    if (this.times.length === 0) return null;
 
-  /**
-   * Zooms out at the specified x-coordinate.
-   * @param centerX X-coordinate of zoom center.
-   */
-  zoomOut(centerX: number): void {
-    this.zoom(centerX, 0.85);
-  }
+    const visibleCount = this.visibleEnd - this.visibleStart;
+    if (visibleCount <= 0) return null;
 
-  /**
-   * Zooms by a factor at the specified x-coordinate.
-   * @param centerX X-coordinate of zoom center.
-   * @param factor Zoom factor (e.g., 1.15 for zoom in, 0.85 for zoom out).
-   */
-  zoom(centerX: number, factor: number): void {
-    if (!Number.isFinite(centerX) || !Number.isFinite(factor) || factor <= 0) {
-      return;
+    const ticks: TimeScaleTick[] = [];
+    const tickInterval = this.calculateTickInterval(visibleCount);
+    let currentIndex = Math.floor(this.visibleStart / tickInterval) * tickInterval;
+
+    while (currentIndex <= this.visibleEnd) {
+      if (currentIndex >= 0 && currentIndex < this.times.length) {
+        const time = this.times[Math.floor(currentIndex)];
+        const x = this.scaleX(currentIndex);
+        ticks.push({
+          time,
+          x,
+          label: new Date(time).toLocaleTimeString(this.options.locale, { timeZone: this.options.timezone }),
+        });
+      }
+      currentIndex += tickInterval;
     }
 
-    const oldCandleWidth = this.opts.candleWidth * this.zoomFactor;
-    const indexAtCursor = this.scrollOffset + centerX / oldCandleWidth;
-    this.zoomFactor *= factor;
-    this.zoomFactor = Math.max(
-      this.opts.minCandleWidth / this.opts.candleWidth,
-      Math.min(this.zoomFactor, this.opts.maxCandleWidth / this.opts.candleWidth)
-    );
-
-    const newCandleWidth = this.opts.candleWidth * this.zoomFactor;
-    this.scrollOffset = indexAtCursor - centerX / newCandleWidth;
-    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.opts.totalCandles));
+    return {
+      visibleStart: this.visibleStart,
+      visibleEnd: this.visibleEnd,
+      candleWidth: this.candleWidth,
+      ticks,
+      scaleX: (index: number) => (index - this.visibleStart) * this.candleWidth,
+      unscaleX: (x: number) => x / this.candleWidth + this.visibleStart,
+    };
   }
 
-  /**
-   * Scrolls the time axis by a delta in candle indices.
-   * @param delta Scroll delta in candle indices.
-   */
-  scroll(delta: number): void {
-    if (!Number.isFinite(delta)) return;
-    this.scrollOffset += delta;
-    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.opts.totalCandles));
+  private calculateTickInterval(visibleCount: number): number {
+    const idealTickCount = Math.max(5, Math.min(10, Math.floor(visibleCount / 10)));
+    return Math.max(1, Math.floor(visibleCount / idealTickCount));
   }
 
-  /**
-   * Computes the current time scale.
-   * @param times Array of candle timestamps (optional).
-   * @returns Time scale result.
-   */
-  compute(times: number[] = []): TimeScaleResult {
-    return computeTimeScale(this.scrollOffset, this.zoomFactor, this.opts, times);
+  private adjustCandleWidth() {
+    const visibleCount = this.visibleEnd - this.visibleStart;
+    if (visibleCount > 0) {
+      this.candleWidth = Math.max(
+        this.options.minCandleWidth,
+        Math.min(this.options.maxCandleWidth, 800 / visibleCount)
+      );
+    }
+  }
+
+  timeToIndex(time: number): number {
+    return this.times.findIndex(t => t >= time) || this.times.length - 1;
+  }
+
+  onChange(callback: () => void) {
+    this.listeners.push(callback);
+  }
+
+  private notifyListeners() {
+    this.listeners.forEach(cb => cb());
+  }
+
+  destroy() {
+    this.times = [];
+    this.listeners = [];
+    this.linkedEngines = [];
+    this.kineticAnimation.destroy();
   }
 }
-```
