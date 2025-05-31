@@ -99,6 +99,15 @@ export class ChartFactory {
       kineticAnimation
     );
 
+    const patternRenderer = new PatternRenderer();
+    const patternManager = new PatternManager(
+      patternRenderer,
+      canvas.getContext('2d')!,
+      timeScaleEngine,
+      priceScaleEngine,
+      widget['eventManager']
+    );
+
     const tooltipManager = new TooltipManager(priceScaleEngine, timeScaleEngine, styleManager.getTooltipOptions());
     const gestureManager = new GestureManager(canvas, timeScaleEngine, priceScaleEngine, kineticAnimation);
     const interactionManager = new InteractionManager(
@@ -111,8 +120,6 @@ export class ChartFactory {
     );
 
     const indicatorRenderer = new IndicatorRenderer(drawingToolManager, styleManager, canvas);
-    const patternRenderer = new PatternRenderer();
-    const patternManager = new PatternManager(patternRenderer);
     const indicatorConfig = new IndicatorConfig(
       { addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as any,
       styleManager
@@ -145,6 +152,7 @@ export class ChartFactory {
       errorHandler,
       drawingToolManager,
       kineticAnimation,
+      patternManager,
       chartOptions
     );
     chartLayout.addChart(widget, crosshairManager, timeScaleEngine);
@@ -156,7 +164,6 @@ export class ChartFactory {
       widget.setData(validatedCandles, validatedTicks);
       crosshairManager.setData(validatedCandles, validatedTicks);
       tooltipManager.setData(validatedCandles, validatedTicks);
-      patternManager.setCandles(validatedCandles);
       analyticsTracker.trackInteraction('data_update');
     });
 
@@ -175,6 +182,7 @@ export class ChartFactory {
     widget['tooltipManager'] = tooltipManager;
     widget['gestureManager'] = gestureManager;
     widget['interactionManager'] = interactionManager;
+    widget['patternManager'] = patternManager;
 
     return widget;
   }
