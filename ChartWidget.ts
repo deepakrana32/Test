@@ -12,6 +12,7 @@ import { StyleManager } from './StyleManager';
 import { LocalizationManager } from './LocalizationManager';
 import { ErrorHandler } from './ErrorHandler';
 import { PatternManager } from './PatternManager';
+import { IndicatorManager } from './IndicatorManager';
 import { Candle, Tick, ChartOptions } from './ChartTypes';
 
 export class ChartWidget {
@@ -26,6 +27,7 @@ export class ChartWidget {
   private drawingToolManager: DrawingToolManager;
   private kineticAnimation: KineticAnimation;
   private patternManager: PatternManager;
+  private indicatorManager: IndicatorManager;
   private panes: PaneWidget[];
   private priceAxis: PriceAxisWidget;
   private timeAxis: TimeAxisWidget;
@@ -43,6 +45,7 @@ export class ChartWidget {
     drawingToolManager: DrawingToolManager,
     kineticAnimation: KineticAnimation,
     patternManager: PatternManager,
+    indicatorManager: IndicatorManager,
     options: Partial<ChartOptions> = {}
   ) {
     if (!canvas) throw new Error('Canvas is required');
@@ -73,6 +76,7 @@ export class ChartWidget {
     this.drawingToolManager = drawingToolManager;
     this.kineticAnimation = kineticAnimation;
     this.patternManager = patternManager;
+    this.indicatorManager = indicatorManager;
     this.panes = [new PaneWidget(this.canvas, this.ctx, this.gl, this, this.priceScale, this.timeScale)];
     this.priceAxis = new PriceAxisWidget(this.canvas, this.ctx, this.gl, this, this.priceScale);
     this.timeAxis = new TimeAxisWidget(this.canvas, this.ctx, this.gl, this, this.timeScale);
@@ -93,7 +97,6 @@ export class ChartWidget {
   }
 
   private handlePatternClick(data: { x: number; index: number; pattern: any }) {
-    // Dispatch to InteractionManager or show pattern details
     console.log(`Pattern clicked at index ${data.index}: ${data.pattern.typeLabels.join(', ')} (${data.pattern.category})`);
   }
 
@@ -104,6 +107,7 @@ export class ChartWidget {
     this.crosshairManager.setTicks(ticks || []);
     this.drawingToolManager.setTicks(ticks || []);
     this.patternManager.setData(candles || []);
+    this.indicatorManager.updateIndicators(candles || []);
     this.priceScale.setData(candles?.map(c => [c.open, c.high, c.low, c.close]).flat() || ticks?.map(t => t.price) || []);
     this.timeScale.setData(candles?.map(c => c.time) || ticks?.map(t => t.time) || []);
     this.renderer.setData(candles, ticks);
@@ -163,9 +167,10 @@ export class ChartWidget {
     // Render crosshair
     this.crosshairManager.render(this.ctx);
 
-    // Render drawing tools and patterns
+    // Render drawing tools, patterns, and indicators
     this.drawingToolManager.render2D(this.ctx, this.options.width, this.options.height);
     this.patternManager.render();
+    this.indicatorManager.render(this.ctx);
     if (this.gl) {
       this.drawingToolManager.renderWebGL(this.gl);
     }
@@ -204,6 +209,7 @@ export class ChartWidget {
     this.drawingToolManager.destroy();
     this.kineticAnimation.destroy();
     this.patternManager.destroy();
+    this.indicatorManager.destroy();
     this.panes.forEach(pane => pane.destroy());
     this.priceAxis.destroy();
     this.timeAxis.destroy();
