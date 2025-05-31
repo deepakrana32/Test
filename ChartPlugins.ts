@@ -15,7 +15,7 @@ interface Plugin {
   render2D?: (ctx: CanvasRenderingContext2D) => void;
   renderScreenshot?: (ctx: CanvasRenderingContext2D, width: number, height: number) => void;
   onAnimationFrame?: (timestamp: number, deltaTime: number) => void;
-  compute?: (data: Float32Array) => IndicatorResult[];
+  compute?: (data: Float32Array, highs?: Float32Array, lows?: Float32Array) => IndicatorResult[];
   destroy?: () => void;
 }
 
@@ -73,14 +73,15 @@ export class ChartPlugins {
       },
       {
         id: 'stochastic',
-        compute: (data: Float32Array) => {
+        compute: (data: Float32Array, highs: Float32Array, lows: Float32Array) => {
           const period = 14;
           const k = new Float32Array(data.length);
           for (let i = period - 1; i < data.length; i++) {
-            const slice = data.slice(i - period + 1, i + 1);
-            const high = Math.max(...slice);
-            const low = Math.min(...slice);
-            k[i] = ((data[i] - low) / (high - low)) * 100;
+            const sliceHigh = highs.slice(i - period + 1, i + 1);
+            const sliceLow = lows.slice(i - period + 1, i + 1);
+            const high = Math.max(...sliceHigh);
+            const low = Math.min(...sliceLow);
+            k[i] = ((data[i] - low) / (high - low || 1)) * 100;
           }
           const d = this.computeSMA(k, 3);
           return [
@@ -117,20 +118,71 @@ export class ChartPlugins {
       },
       {
         id: 'atr',
-        compute: (data: Float32Array) => {
+        compute: (data: Float32Array, highs: Float32Array, lows: Float32Array) => {
           const period = 14;
           const atr = new Float32Array(data.length);
           let trSum = 0;
           for (let i = 1; i < period; i++) {
-            const tr = Math.max(data[i] - data[i - 1], Math.abs(data[i] - data[i - 1]));
+            const tr = Math.max(
+              highs[i] - lows[i],
+              Math.abs(highs[i] - data[i - 1]),
+              Math.abs(lows[i] - data[i - 1])
+            );
             trSum += tr;
           }
           atr[period - 1] = trSum / period;
           for (let i = period; i < data.length; i++) {
-            const tr = Math.max(data[i] - data[i - 1], Math.abs(data[i] - data[i - 1]));
+            const tr = Math.max(
+              highs[i] - lows[i],
+              Math.abs(highs[i] - data[i - 1]),
+              Math.abs(lows[i] - data[i - 1])
+            );
             atr[i] = (atr[i - 1] * (period - 1) + tr) / period;
           }
           return [{ id: 'atr', data: atr }];
+        },
+      },
+      {
+        id: 'ichimoku',
+        compute: (data: Float32Array, highs: Float32Array, lows: Float32Array) => {
+          const tenkanPeriod = 9;
+          const kijunPeriod = 26;
+          const senkouBPeriod = 52;
+          const tenkanSen = new Float32Array(data.length);
+          const kijunSen = new Float32Array(data.length);
+          const senkouSpanA = new Float32Array(data.length);
+          const senkouSpanB = new Float32Array(data.length);
+          const chikouSpan = new Float32Array(data.length);
+
+          for (let i = 0; i < data.length; i++) {
+            if (i >= tenkanPeriod - 1) {
+              const highSlice = highs.slice(i - tenkanPeriod + 1, i + 1);
+              const lowSlice = lows.slice(i - tenkanPeriod + 1, i + 1);
+              tenkanSen[i] = (Math.max(...highSlice) + Math.min(...lowSlice)) / 2;
+            }
+            if (i >= kijunPeriod - 1) {
+              const highSlice = highs.slice(i - kijunPeriod + 1, i + 1);
+              const lowSlice = lows.slice(i - kijunPeriod + 1, i + 1);
+              kijunSen[i] = (Math.max(...highSlice) + Math.min(...lowSlice)) / 2;
+            }
+            if (i >= kijunPeriod - 1) {
+              senkouSpanA[i + kijunPeriod] = (tenkanSen[i] + kijunSen[i]) / 2;
+            }
+            if (i >= senkouBPeriod - 1) {
+              const highSlice = highs.slice(i - senkouBPeriod + 1, i + 1);
+              const lowSlice = lows.slice(i - senkouBPeriod + 1, i + 1);
+              senkouSpanB[i + kijunPeriod] = (Math.max(...highSlice) + Math.min(...lowSlice)) / 2;
+            }
+            chikouSpan[i - kijunPeriod] = data[i];
+          }
+
+          return [
+            { id: 'ichimoku_tenkan', data: tenkanSen },
+            { id: 'ichimoku_kijun', data: kijunSen },
+            { id: 'ichimoku_span_a', data: senkouSpanA },
+            { id: 'ichimoku_span_b', data: senkouSpanB },
+            { id: 'ichimoku_chikou', data: chikouSpan },
+          ];
         },
       },
     ];
@@ -205,10 +257,10 @@ export class ChartPlugins {
     this.plugins.forEach(p => p.onAnimationFrame?.(timestamp, deltaTime));
   }
 
-  computeIndicators(data: Float32Array) {
+  computeIndicators(data: Float32Array, highs?: Float32Array, lows?: Float32Array) {
     this.plugins.forEach(p => {
       if (p.compute) {
-        const results = p.compute(data);
+        const results = p.compute(data, highs, lows);
         results.forEach(result => {
           this.renderer?.setIndicator(result.id, result.data);
         });
