@@ -68,7 +68,7 @@ export class ChartEngineCore {
   private readonly toolManager: DrawingToolManager;
   private readonly context: PluginContext;
   private readonly indicators: Required<ChartEngineOptions['indicators']>;
-  private readonly device: GPUDevice | null = null; // Placeholder; set via WebGPU init
+  private readonly device: GPUDevice | null = null; // Placeholder
   private width: number;
   private height: number;
   private dpr: number;
@@ -117,8 +117,23 @@ export class ChartEngineCore {
       patternOverlay: true,
       ...options.indicators,
     };
-    this.priceScale = options.priceScale ?? { height: this.height, minPrice: 0, maxPrice: 100, minRangeMargin: 0.1, pixelPerTick: 50, minTicks: 5, maxTicks: 20 };
-    this.timeScale = options.timeScale ?? { width: this.width, candleWidth: 10, minCandleWidth: 5, maxCandleWidth: 20, totalCandles: 100, offset: 0 };
+    this.priceScale = options.priceScale ?? {
+      height: this.height,
+      minPrice: 0,
+      maxPrice: 100,
+      minRangeMargin: 0.1,
+      pixelPerTick: 50,
+      minTicks: 5,
+      maxTicks: 20,
+    };
+    this.timeScale = options.timeScale ?? {
+      width: this.width,
+      candleWidth: 10,
+      minCandleWidth: 5,
+      maxCandleWidth: 20,
+      totalCandles: 100,
+      offset: 0,
+    };
     this.context = {
       emit: (event, data) => console.log(`Event: ${event}`, data),
       getContainer: () => this.canvas.parentElement ?? document.body,
@@ -145,7 +160,6 @@ export class ChartEngineCore {
     }
     this.setupGUI();
     this.setupEventListeners();
-    this.setupPlugins();
   }
 
   private setupGUI(): void {
@@ -205,6 +219,7 @@ export class ChartEngineCore {
           Math.max(this.timeScale.minCandleWidth, this.timeScale.candleWidth * zoomFactor)
         );
         this.context.emit?.('zoom', { candleWidth: this.timeScale.candleWidth, x });
+        this.plugins.dispatchEvent('zoom', { delta, x });
         this.render();
       }
     });
@@ -213,6 +228,7 @@ export class ChartEngineCore {
       if (this.isChartMode) {
         this.timeScale.offset = (this.timeScale.offset || 0) + dx / this.timeScale.candleWidth;
         this.context.emit?.('pan', { dx, offset: this.timeScale.offset });
+        this.plugins.dispatchEvent('pan', { dx });
         this.render();
       }
     });
@@ -236,6 +252,7 @@ export class ChartEngineCore {
         this.context.emit?.('toolHovered', { x, y, index, price });
         this.render();
       }
+      this.plugins.dispatchEvent('hover', { x, y });
     });
 
     this.eventManager.on('rightclick', ({ x, y }: any) => {
@@ -246,6 +263,7 @@ export class ChartEngineCore {
         this.context.emit?.('toolContextMenu', { x, y, index, price });
         this.render();
       }
+      this.plugins.dispatchEvent('rightclick', { x, y });
     });
 
     const container = this.context.getContainer?.();
@@ -280,8 +298,12 @@ export class ChartEngineCore {
     const closes = Float32Array.from(candles.map(c => c.close));
     const volumes = Float32Array.from(candles.map(c => c.volume));
     const times = candles.map(c => c.time);
-    const volatility = candles.map((_, i) => i > 0 ? Math.abs(candles[i].close - candles[i-1].close) : 0); // Placeholder
-    const atrValues = candles.map(() => 1); // Placeholder
+    const volatility = candles.map((_, i) => i > 0 ? Math.abs(candles[i].close - candles[i-1].close) : 0);
+    const atrValues = candles.map((c, i) => i > 0 ? Math.max(
+      c.high - c.low,
+      Math.abs(c.high - candles[i-1].close),
+      Math.abs(c.low - candles[i-1].close)
+    ) : c.high - c.low);
     const workerResults = usePatternWorker(candles, {
       enableCandlestick: this.indicators.patternWorker,
       enableStructure: this.indicators.patternWorker,
@@ -289,7 +311,7 @@ export class ChartEngineCore {
       batchSize: 1000,
     });
 
-    // Time Axis Plugin
+    // Time Axis
     this.plugins.register({
       name: 'TimeAxis',
       priority: -2,
@@ -300,7 +322,7 @@ export class ChartEngineCore {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         times.forEach((time, i) => {
-          if (i % 10 === 0) { // Sparse ticks
+          if (i % 10 === 0) {
             const x = this.computeScaleX(i);
             ctx.fillText(new Date(time).toLocaleTimeString(), x, this.height + 5);
           }
@@ -310,7 +332,7 @@ export class ChartEngineCore {
       renderGPU: () => {},
     });
 
-    // Price Axis Plugin
+    // Price Axis
     this.plugins.register({
       name: 'PriceAxis',
       priority: -1,
@@ -334,31 +356,31 @@ export class ChartEngineCore {
 
     // Indicators
     if (this.indicators.vwap) {
-      this.plugins.register(new VWAPOverlay(candles, this.device, this.width, this.height));
+      this.plugins.register(new VWAPOverlay(candles, this.device, this.width, this.height, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.hybridMA) {
-      this.plugins.register(new HybridMAOverlay(prices, this.device, this.width, this.height));
+      this.plugins.register(new HybridMAOverlay(prices, this.device, this.width, this.height, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.ichimoku) {
-      this.plugins.register(new IchimokuCloud(highs, lows, candles.length, this.device, this.width, this.height));
+      this.plugins.register(new IchimokuCloud(highs, lows, candles.length, this.device, this.width, this.height, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.alma) {
-      this.plugins.register(new ALMAOverlay(candles, this.width, this.height, this.device));
+      this.plugins.register(new ALMAOverlay(candles, this.width, this.height, this.device, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.stochasticRSI) {
-      this.plugins.register(new StochasticRSIOverlay(prices, this.width, this.height, 1));
+      this.plugins.register(new StochasticRSIOverlay(prices, this.width, this.height, 1, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.bollinger) {
-      this.plugins.register(new BollingerBandRenderer());
+      this.plugins.register(new BollingerBandRenderer(this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.atrHeatmap) {
-      this.plugins.register(new ATRHeatmapRenderer(Float32Array.from(atrValues), 0.6, 1.5, this.device));
+      this.plugins.register(new ATRHeatmapRenderer(Float32Array.from(atrValues), 0.6, 1.5, this.device, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.adr) {
-      this.plugins.register(new ADRIndicator(candles));
+      this.plugins.register(new ADRIndicator(candles, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.macd) {
-      this.plugins.register(new MACDIndicator(prices, this.width, 100, 1));
+      this.plugins.register(new MACDIndicator(prices, this.width, 100, 1, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
     if (this.indicators.mcginley) {
       const mcginley = createMcGinleyDynamic(closes, Float32Array.from(volatility));
@@ -384,7 +406,7 @@ export class ChartEngineCore {
       });
     }
     if (this.indicators.supertrend) {
-      this.plugins.register(new SupertrendOverlay(candles, this.device, this.width, this.height));
+      this.plugins.register(new SupertrendOverlay(candles, this.device, this.width, this.height, this.computeScaleX.bind(this), this.computeScaleY.bind(this)));
     }
 
     // Pattern Engines
@@ -610,13 +632,13 @@ export class ChartEngineCore {
 
     this.updateCanvasDimensions();
     try {
-      if (this.useGPU) {
-        console.warn('GPU rendering not implemented except for PatternEngineGPU');
+      if (this.useGPU && this.device) {
+        await this.plugins.initializeGPU(this.device);
       }
       if (this.options.config) {
         await this.init(this.options.config);
       }
-      this.plugins.initialize();
+      this.plugins.initialize2D(this.canvas.getContext('2d')!);
       this.isInitialized = true;
       this.startLoop();
       this.context.emit?.('initialized', {});
@@ -663,7 +685,10 @@ export class ChartEngineCore {
         this.computeScaleY.bind(this)
       );
       this.toolManager.renderTools(ctx);
-      this.plugins.render(ctx);
+      this.plugins.render2D(ctx);
+      if (this.useGPU && this.device) {
+        // Placeholder for GPU rendering
+      }
       this.canvas.getContext('2d')!.drawImage(this.offscreenCanvas!, 0, 0);
     } catch (error) {
       console.error(`Render failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -727,7 +752,7 @@ export class ChartEngineCore {
       this.computeScaleY.bind(this)
     );
     this.setupPlugins();
-    this.plugins.initialize();
+    this.plugins.initialize2D(this.canvas.getContext('2d')!);
     this.eventManager.setChartMode(this.isChartMode);
     this.toolManager.setChartMode(this.isChartMode);
     this.context.emit?.('chartInitialized', { config });
@@ -751,7 +776,7 @@ export class ChartEngineCore {
       this.computeScaleY.bind(this)
     );
     this.setupPlugins();
-    this.plugins.render(this.canvas.getContext('2d')!);
+    this.plugins.render2D(this.canvas.getContext('2d')!);
     this.context.emit?.('chartRendered', { config });
   }
 
@@ -773,7 +798,7 @@ export class ChartEngineCore {
       this.computeScaleY.bind(this)
     );
     this.setupPlugins();
-    this.plugins.render(this.canvas.getContext('2d')!);
+    this.plugins.render2D(this.canvas.getContext('2d')!);
     this.context.emit?.('chartUpdated', { config });
   }
 
