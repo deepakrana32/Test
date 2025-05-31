@@ -1,4 +1,4 @@
-import { ChartEventManager, ChartEventType } from './ChartEventManager';
+import { ChartEventManager } from './ChartEventManager';
 import { CrosshairManager } from './CrosshairManager';
 import { PaneWidget } from './PaneWidget';
 import { PriceAxisWidget } from './PriceAxisWidget';
@@ -11,7 +11,8 @@ import { KineticAnimation } from './KineticAnimation';
 import { StyleManager } from './StyleManager';
 import { LocalizationManager } from './LocalizationManager';
 import { ErrorHandler } from './ErrorHandler';
-import { Candle, Tick, CrosshairParams, ChartOptions } from './ChartTypes';
+import { PatternManager } from './PatternManager';
+import { Candle, Tick, ChartOptions } from './ChartTypes';
 
 export class ChartWidget {
   private canvas: HTMLCanvasElement;
@@ -24,6 +25,7 @@ export class ChartWidget {
   private renderer: ChartRenderer;
   private drawingToolManager: DrawingToolManager;
   private kineticAnimation: KineticAnimation;
+  private patternManager: PatternManager;
   private panes: PaneWidget[];
   private priceAxis: PriceAxisWidget;
   private timeAxis: TimeAxisWidget;
@@ -40,6 +42,7 @@ export class ChartWidget {
     errorHandler: ErrorHandler,
     drawingToolManager: DrawingToolManager,
     kineticAnimation: KineticAnimation,
+    patternManager: PatternManager,
     options: Partial<ChartOptions> = {}
   ) {
     if (!canvas) throw new Error('Canvas is required');
@@ -69,6 +72,7 @@ export class ChartWidget {
     );
     this.drawingToolManager = drawingToolManager;
     this.kineticAnimation = kineticAnimation;
+    this.patternManager = patternManager;
     this.panes = [new PaneWidget(this.canvas, this.ctx, this.gl, this, this.priceScale, this.timeScale)];
     this.priceAxis = new PriceAxisWidget(this.canvas, this.ctx, this.gl, this, this.priceScale);
     this.timeAxis = new TimeAxisWidget(this.canvas, this.ctx, this.gl, this, this.timeScale);
@@ -84,7 +88,13 @@ export class ChartWidget {
     this.eventManager.on('zoom', (data) => this.handleZoom(data.x, data.delta));
     this.eventManager.on('pan', (data) => this.handleScroll(data.dx));
     this.eventManager.on('crosshair', (data) => this.renderer.setCrosshair(data));
+    this.eventManager.on('patternClick', (data) => this.handlePatternClick(data));
     this.canvas.addEventListener('resize', this.handleResize.bind(this));
+  }
+
+  private handlePatternClick(data: { x: number; index: number; pattern: any }) {
+    // Dispatch to InteractionManager or show pattern details
+    console.log(`Pattern clicked at index ${data.index}: ${data.pattern.typeLabels.join(', ')} (${data.pattern.category})`);
   }
 
   setData(candles: Candle[] | null, ticks: Tick[] | null) {
@@ -93,6 +103,7 @@ export class ChartWidget {
     this.crosshairManager.setCandles(candles || []);
     this.crosshairManager.setTicks(ticks || []);
     this.drawingToolManager.setTicks(ticks || []);
+    this.patternManager.setData(candles || []);
     this.priceScale.setData(candles?.map(c => [c.open, c.high, c.low, c.close]).flat() || ticks?.map(t => t.price) || []);
     this.timeScale.setData(candles?.map(c => c.time) || ticks?.map(t => t.time) || []);
     this.renderer.setData(candles, ticks);
@@ -152,8 +163,9 @@ export class ChartWidget {
     // Render crosshair
     this.crosshairManager.render(this.ctx);
 
-    // Render drawing tools
+    // Render drawing tools and patterns
     this.drawingToolManager.render2D(this.ctx, this.options.width, this.options.height);
+    this.patternManager.render();
     if (this.gl) {
       this.drawingToolManager.renderWebGL(this.gl);
     }
@@ -191,6 +203,7 @@ export class ChartWidget {
     this.crosshairManager.destroy();
     this.drawingToolManager.destroy();
     this.kineticAnimation.destroy();
+    this.patternManager.destroy();
     this.panes.forEach(pane => pane.destroy());
     this.priceAxis.destroy();
     this.timeAxis.destroy();
