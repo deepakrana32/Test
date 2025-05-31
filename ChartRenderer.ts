@@ -1,60 +1,105 @@
-// ChartRenderer.ts
-import { ChartPlugin } from './ChartPlugins';
-import { Candle, PriceScaleOptions, TimeScaleOptions } from './ChartTypes';
+import { Candle, Tick, Series, CrosshairEvent, PriceScaleResult, TimeScaleResult, DrawingTool } from './ChartTypes';
+import { PriceScaleEngine } from './PriceScaleEngine';
+import { TimeScaleEngine } from './TimeScaleEngine';
+import { ChartGPUBackend } from './ChartGPUBackend';
+import { Chart2DCanvasFallback } from './Chart2DCanvasFallback';
+import { DrawingToolManager } from './DrawingToolManager';
+import { CrosshairManager } from './CrosshairManager';
 
-export class ChartRendererPlugin implements ChartPlugin {
-  name = 'CandlestickRenderer';
-  priority = -10; // Render before indicators
-  private candles: Candle[] = [];
-  private timeScale: TimeScaleOptions;
-  private priceScale: PriceScaleOptions;
-  private computeScaleX: (index: number) => number;
-  private computeScaleY: (price: number) => number;
+export class ChartRenderer {
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+  private gl: WebGL2RenderingContext | null;
+  private gpuBackend: ChartGPUBackend;
+  private canvasFallback: Chart2DCanvasFallback;
+  private candles: Candle[] | null;
+  private ticks: Tick[] | null;
+  private drawingTools: DrawingTool[];
+  private crosshair: CrosshairEvent | null;
+  private indicators: Map<string, Float32Array>;
 
   constructor(
-    candles: Candle[],
-    timeScale: TimeScaleOptions,
-    priceScale: PriceScaleOptions,
-    computeScaleX: (index: number) => number,
-    computeScaleY: (price: number) => number
+    canvas: HTMLCanvasElement,
+    ctx: CanvasRenderingContext2D,
+    gl: WebGL2RenderingContext | null
   ) {
-    this.candles = candles;
-    this.timeScale = timeScale;
-    this.priceScale = priceScale;
-    this.computeScaleX = computeScaleX;
-    this.computeScaleY = computeScaleY;
+    if (!canvas || !ctx) throw new Error('Canvas or context missing');
+    this.canvas = canvas;
+    this.ctx = ctx;
+    this.gl = gl;
+    this.gpuBackend = new ChartGPUBackend(canvas, gl);
+    this.canvasFallback = new Chart2DCanvasFallback(canvas, ctx);
+    this.candles = null;
+    this.ticks = null;
+    this.drawingTools = [];
+    this.crosshair = null;
+    this.indicators = new Map();
   }
 
-  updateCandles(candles: Candle[]): void {
+  setData(candles: Candle[] | null, ticks: Tick[] | null) {
     this.candles = candles;
+    this.ticks = ticks;
+    this.gpuBackend.setData(candles, ticks);
+    this.canvasFallback.setData(candles, ticks);
   }
 
-  render2D(ctx: CanvasRenderingContext2D): void {
-    ctx.save();
-    this.candles.forEach((candle, index) => {
-      const x = this.computeScaleX(index);
-      const openY = this.computeScaleY(candle.open);
-      const closeY = this.computeScaleY(candle.close);
-      const highY = this.computeScaleY(candle.high);
-      const lowY = this.computeScaleY(candle.low);
-      const halfWidth = this.timeScale.candleWidth / 2;
+  setDrawingTools(tools: DrawingTool[]) {
+    this.drawingTools = tools;
+    this.gpuBackend.setDrawingTools(tools);
+    this.canvasFallback.setDrawingTools(tools);
+  }
 
-      ctx.beginPath();
-      ctx.moveTo(x, highY);
-      ctx.lineTo(x, lowY);
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+  setCrosshair(crosshair: CrosshairEvent) {
+    this.crosshair = crosshair;
+  }
 
-      ctx.fillStyle = candle.close >= candle.open ? 'green' : 'red';
-      const bodyY = candle.close >= candle.open ? closeY : openY;
-      const bodyHeight = Math.abs(openY - closeY) || 1;
-      ctx.fillRect(x - halfWidth, bodyY, this.timeScale.candleWidth, bodyHeight);
+  setIndicator(id: string, data: Float32Array) {
+    this.indicators.set(id, data);
+    this.gpuBackend.setIndicator(id, data);
+    this.canvasFallback.setIndicator(id, data);
+  }
+
+  renderSeries(
+    series: Series,
+    ctx: CanvasRenderingContext2D,
+    gl: WebGL2RenderingContext | null,
+    priceScale: PriceScaleEngine,
+    timeScale: TimeScaleEngine
+  ) {
+    const priceResult = priceScale.computePriceScale();
+    const timeResult = timeScale.computeTimeScale();
+    if (!priceResult || !timeResult) return;
+
+    if (gl) {
+      this.gpuBackend.renderSeries(series, priceResult, timeResult);
+    } else {
+      this.canvasFallback.renderSeries(series, priceResult, timeResult);
+    }
+
+    // Render indicators
+    this.indicators.forEach((data, id) => {
+      if (gl) {
+        this.gpuBackend.renderIndicator(id, priceResult, timeResult);
+      } else {
+        this.canvasFallback.renderIndicator(id, priceResult, timeResult);
+      }
     });
-    ctx.restore();
   }
 
-  renderGPU(): void {
-    // Optional GPU rendering
+  getGPUDevice(): GPUDevice | null {
+    return this.gpuBackend.getDevice();
+  }
+
+  getGPURenderPass(): GPURenderPassEncoder | null {
+    return this.gpuBackend.getRenderPass();
+  }
+
+  destroy() {
+    this.gpuBackend.destroy();
+    this.canvasFallback.destroy();
+    this.candles = null;
+    this.ticks = null;
+    this.drawingTools = [];
+    this.indicators.clear();
   }
 }
