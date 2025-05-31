@@ -77,23 +77,10 @@ export class ChartFactory {
     const timeScaleEngine = new TimeScaleEngine({ locale, timezone });
     const crosshairManager = new CrosshairManager(priceScaleEngine, timeScaleEngine, styleManager.getCrosshairParams());
 
-    // Initialize kinetic animation
+    // Initialize kinetic animation and drawing tool manager
     const kineticAnimation = new KineticAnimation((dx: number) => {
       widget.handleScroll(dx / timeScaleEngine.computeTimeScale().scaleX(1));
     });
-
-    const tooltipManager = new TooltipManager(priceScaleEngine, timeScaleEngine, styleManager.getTooltipOptions());
-    const gestureManager = new GestureManager(canvas, timeScaleEngine, priceScaleEngine, kineticAnimation);
-    const interactionManager = new InteractionManager(
-      { canvas } as ChartWidget,
-      crosshairManager,
-      timeScaleEngine,
-      priceScaleEngine,
-      kineticAnimation,
-      styleManager
-    );
-
-    // Initialize drawing tool manager
     const drawingToolManager = new DrawingToolManager(
       canvas,
       canvas.getContext('2d')!,
@@ -110,6 +97,17 @@ export class ChartFactory {
       localizationManager,
       styleManager,
       kineticAnimation
+    );
+
+    const tooltipManager = new TooltipManager(priceScaleEngine, timeScaleEngine, styleManager.getTooltipOptions());
+    const gestureManager = new GestureManager(canvas, timeScaleEngine, priceScaleEngine, kineticAnimation);
+    const interactionManager = new InteractionManager(
+      { canvas } as ChartWidget,
+      crosshairManager,
+      timeScaleEngine,
+      priceScaleEngine,
+      kineticAnimation,
+      styleManager
     );
 
     const indicatorRenderer = new IndicatorRenderer(drawingToolManager, styleManager, canvas);
@@ -140,13 +138,22 @@ export class ChartFactory {
       timeScale: { locale, timezone },
       crosshair: styleManager.getCrosshairParams(),
     };
-    const widget = new ChartWidget(canvas);
+    const widget = new ChartWidget(
+      canvas,
+      styleManager,
+      localizationManager,
+      errorHandler,
+      drawingToolManager,
+      kineticAnimation,
+      chartOptions
+    );
     chartLayout.addChart(widget, crosshairManager, timeScaleEngine);
 
     // Connect data flow
     dataManager.onData((candles: Candle[], ticks: Tick[]) => {
       const validatedCandles = dataValidator.validateCandles(candles);
       const validatedTicks = dataValidator.validateTicks(ticks);
+      widget.setData(validatedCandles, validatedTicks);
       crosshairManager.setData(validatedCandles, validatedTicks);
       tooltipManager.setData(validatedCandles, validatedTicks);
       patternManager.setCandles(validatedCandles);
