@@ -4,46 +4,62 @@ import { ChartEventManager } from './ChartEventManager';
 import { ChartPlugins, ChartPlugin } from './ChartPlugins';
 import { ChartConfig, DrawingTool, DrawingToolState, PriceScaleOptions, TimeScaleOptions, validateChartConfig, Candle } from './ChartTypes';
 import { DrawingToolManager } from './DrawingToolManager';
+import { detectCandlePatterns, PATTERN_FLAG_MAP } from './patterns/candlePatterns';
+import { PatternEngine } from './PatternEngine';
+import { PatternEngineGPU } from './PatternEngineGPU';
+import { computePatternEngineNextGen } from './PatternEngineNextGen';
+import { createPatternOverlayPlugin } from './PatternOverlayRenderer';
+import { usePatternWorker } from './usePatternWorker';
+import { VWAPOverlay } from './indicators/VWAPOverlay';
+import { HybridMAOverlay } from './indicators/HybridMAOverlay';
+import { IchimokuCloud } from './indicators/IchimokuCloud';
+import { ALMAOverlay } from './indicators/ALMAOverlay';
+import { StochasticRSIOverlay } from './indicators/StochasticRSIOverlay';
+import { BollingerBandRenderer } from './indicators/BollingerBandRenderer';
+import { ATRHeatmapRenderer } from './indicators/ATRHeatmapRenderer';
+import { ADRIndicator } from './indicators/ADRIndicator';
+import { MACDIndicator } from './indicators/MACDIndicator';
+import { SupertrendOverlay } from './indicators/SupertrendOverlay';
+import { createMcGinleyDynamic } from './indicators/useMcGinleyDynamic';
+import { createDrawingToolsPlugin } from './DrawingToolsPlugin';
 import { throttle } from 'lodash';
 
-/**
- * Interface for chart engine options.
- * @interface
- */
 interface ChartEngineOptions {
-  /** The HTML canvas element to render on */
   canvas: HTMLCanvasElement;
-  /** Whether to attempt GPU rendering (default: false) */
   useGPU?: boolean;
-  /** Canvas width in CSS pixels */
   width: number;
-  /** Canvas height in CSS pixels */
   height: number;
-  /** Device pixel ratio for high-DPI displays (default: window.devicePixelRatio) */
   dpr?: number;
-  /** Initial chart configuration or data URL */
   config?: ChartConfig | string;
-  /** Initial drawing tools */
   tools?: DrawingTool[];
-  /** Price scale options */
   priceScale?: PriceScaleOptions;
-  /** Time scale options */
   timeScale?: TimeScaleOptions;
+  indicators?: {
+    vwap?: boolean;
+    hybridMA?: boolean;
+    ichimoku?: boolean;
+    alma?: boolean;
+    stochasticRSI?: boolean;
+    bollinger?: boolean;
+    atrHeatmap?: boolean;
+    adr?: boolean;
+    macd?: boolean;
+    mcginley?: boolean;
+    supertrend?: boolean;
+    candlePatterns?: boolean;
+    patternEngine?: boolean;
+    patternEngineGPU?: boolean;
+    patternEngineNextGen?: boolean;
+    patternWorker?: boolean;
+    patternOverlay?: boolean;
+  };
 }
 
-/**
- * Interface for plugin context to provide event emission and container access.
- * @interface
- */
 interface PluginContext {
   emit?: (event: string, data: any) => void;
   getContainer?: () => HTMLElement;
 }
 
-/**
- * Core charting engine for custom financial charting, managing rendering, events, plugins, and drawing tools.
- * @class
- */
 export class ChartEngineCore {
   private readonly canvas: HTMLCanvasElement;
   private readonly renderer: ChartRenderer;
@@ -51,6 +67,8 @@ export class ChartEngineCore {
   private readonly plugins: ChartPlugins;
   private readonly toolManager: DrawingToolManager;
   private readonly context: PluginContext;
+  private readonly indicators: Required<ChartEngineOptions['indicators']>;
+  private readonly device: GPUDevice | null = null; // Placeholder; set via WebGPU init
   private width: number;
   private height: number;
   private dpr: number;
@@ -68,24 +86,39 @@ export class ChartEngineCore {
   private currentTimeframe: string | null = null;
   private currentConfig: ChartConfig | null = null;
 
-  /**
-   * Creates a new ChartEngineCore instance.
-   * @param options Configuration options for the chart engine.
-   * @throws Error if options are invalid.
-   */
   constructor(options: ChartEngineOptions) {
-    if (!(options.canvas instanceof HTMLCanvasElement)) throw new Error('Invalid canvas: must be an HTMLCanvasElement');
-    if (!Number.isFinite(options.width) || options.width <= 0) throw new Error('Invalid width: must be a positive number');
-    if (!Number.isFinite(options.height) || options.height <= 0) throw new Error('Invalid height: must be a positive number');
-    if (options.dpr !== undefined && (!Number.isFinite(options.dpr) || options.dpr <= 0)) throw new Error('Invalid dpr: must be a positive number');
+    if (!(options.canvas instanceof HTMLCanvasElement)) throw new Error('Invalid canvas');
+    if (!Number.isFinite(options.width) || options.width <= 0) throw new Error('Invalid width');
+    if (!Number.isFinite(options.height) || options.height <= 0) throw new Error('Invalid height');
+    if (options.dpr !== undefined && (!Number.isFinite(options.dpr) || options.dpr <= 0)) throw new Error('Invalid dpr');
 
     this.canvas = options.canvas;
     this.width = options.width;
     this.height = options.height;
     this.dpr = options.dpr ?? window.devicePixelRatio ?? 1;
     this.useGPU = options.useGPU ?? false;
-    this.priceScale = options.priceScale ?? { height: this.height, minRangeMargin: 0.1, pixelPerTick: 50, minTicks: 5, maxTicks: 20 };
-    this.timeScale = options.timeScale ?? { width: this.width, candleWidth: 10, minCandleWidth: 5, maxCandleWidth: 20, totalCandles: 100 };
+    this.indicators = {
+      vwap: true,
+      hybridMA: true,
+      ichimoku: true,
+      alma: true,
+      stochasticRSI: true,
+      bollinger: true,
+      atrHeatmap: true,
+      adr: true,
+      macd: true,
+      mcginley: true,
+      supertrend: true,
+      candlePatterns: true,
+      patternEngine: true,
+      patternEngineGPU: true,
+      patternEngineNextGen: true,
+      patternWorker: true,
+      patternOverlay: true,
+      ...options.indicators,
+    };
+    this.priceScale = options.priceScale ?? { height: this.height, minPrice: 0, maxPrice: 100, minRangeMargin: 0.1, pixelPerTick: 50, minTicks: 5, maxTicks: 20 };
+    this.timeScale = options.timeScale ?? { width: this.width, candleWidth: 10, minCandleWidth: 5, maxCandleWidth: 20, totalCandles: 100, offset: 0 };
     this.context = {
       emit: (event, data) => console.log(`Event: ${event}`, data),
       getContainer: () => this.canvas.parentElement ?? document.body,
@@ -112,12 +145,9 @@ export class ChartEngineCore {
     }
     this.setupGUI();
     this.setupEventListeners();
+    this.setupPlugins();
   }
 
-  /**
-   * Sets up the GUI toolbar for chart controls, including symbol and timeframe display.
-   * @private
-   */
   private setupGUI(): void {
     const container = this.context.getContainer?.();
     if (container) {
@@ -129,10 +159,10 @@ export class ChartEngineCore {
         <div id="chartInfo" style="margin-bottom: 5px;" aria-label="Chart Information">
           ${this.currentSymbol || 'Unknown Symbol'} ${this.currentTimeframe || 'Unknown Timeframe'}
         </div>
-        <button id="chartMode" aria-label="Click to switch to Chart Mode">Chart Mode</button>
-        <button id="drawMode" aria-label="Click to switch to Drawing Mode">Draw Mode</button>
-        <button id="undo" aria-label="Click to undo last action">Undo</button>
-        <button id="redo" aria-label="Click to redo last action">Redo</button>
+        <button id="chartMode" aria-label="Switch to Chart Mode">Chart Mode</button>
+        <button id="drawMode" aria-label="Switch to Drawing Mode">Draw Mode</button>
+        <button id="undo" aria-label="Undo last action">Undo</button>
+        <button id="redo" aria-label="Redo last action">Redo</button>
         <select id="toolSelect" aria-label="Select a drawing tool">
           <option value="">Select Tool</option>
           <option value="trendline">Trendline</option>
@@ -158,10 +188,6 @@ export class ChartEngineCore {
     }
   }
 
-  /**
-   * Updates the GUI to reflect current symbol and timeframe.
-   * @private
-   */
   private updateGUI(): void {
     const chartInfo = this.context.getContainer?.().querySelector('#chartInfo') as HTMLElement;
     if (chartInfo) {
@@ -170,10 +196,6 @@ export class ChartEngineCore {
     }
   }
 
-  /**
-   * Sets up event listeners via ChartEventManager.
-   * @private
-   */
   private setupEventListeners(): void {
     this.eventManager.on('zoom', ({ delta, x }: any) => {
       if (this.isChartMode) {
@@ -189,7 +211,6 @@ export class ChartEngineCore {
 
     this.eventManager.on('pan', ({ dx }: any) => {
       if (this.isChartMode) {
-        // Simplified panning: adjust visible candle range
         this.timeScale.offset = (this.timeScale.offset || 0) + dx / this.timeScale.candleWidth;
         this.context.emit?.('pan', { dx, offset: this.timeScale.offset });
         this.render();
@@ -204,6 +225,7 @@ export class ChartEngineCore {
         this.context.emit?.('toolClicked', { x, y, index, price });
         this.render();
       }
+      this.plugins.dispatchEvent('click', { x, y });
     });
 
     this.eventManager.on('hover', ({ x, y }: any) => {
@@ -226,7 +248,6 @@ export class ChartEngineCore {
       }
     });
 
-    // GUI events
     const container = this.context.getContainer?.();
     if (container) {
       container.addEventListener('click', (e) => {
@@ -247,65 +268,340 @@ export class ChartEngineCore {
         this.context.emit?.('toolSelected', { tool });
       });
     }
-
-    // Keyboard accessibility
-    this.canvas.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowLeft') {
-        this.eventManager.emit('pan', { dx: 10 });
-      } else if (e.key === 'ArrowRight') {
-        this.eventManager.emit('pan', { dx: -10 });
-      } else if (e.key === 'ArrowUp') {
-        this.eventManager.emit('zoom', { delta: 0.1, x: this.width / 2 });
-      } else if (e.key === 'ArrowDown') {
-        this.eventManager.emit('zoom', { delta: -0.1, x: this.width / 2 });
-      } else if (e.key === 'Enter' && !this.isChartMode) {
-        const toolSelect = this.context.getContainer?.().querySelector('#toolSelect') as HTMLSelectElement;
-        if (toolSelect) {
-          this.toolManager.setActiveTool(toolSelect.value || null);
-          this.context.emit?.('toolSelected', { tool: toolSelect.value });
-        }
-      }
-    });
   }
 
-  /**
-   * Computes x-coordinate from candle index.
-   * @private
-   */
+  private setupPlugins(): void {
+    if (!this.currentConfig) return;
+
+    const candles = this.currentConfig.candles;
+    const prices = candles.map(c => c.close);
+    const highs = Float32Array.from(candles.map(c => c.high));
+    const lows = Float32Array.from(candles.map(c => c.low));
+    const closes = Float32Array.from(candles.map(c => c.close));
+    const volumes = Float32Array.from(candles.map(c => c.volume));
+    const times = candles.map(c => c.time);
+    const volatility = candles.map((_, i) => i > 0 ? Math.abs(candles[i].close - candles[i-1].close) : 0); // Placeholder
+    const atrValues = candles.map(() => 1); // Placeholder
+    const workerResults = usePatternWorker(candles, {
+      enableCandlestick: this.indicators.patternWorker,
+      enableStructure: this.indicators.patternWorker,
+      maxPatternLookback: 100,
+      batchSize: 1000,
+    });
+
+    // Time Axis Plugin
+    this.plugins.register({
+      name: 'TimeAxis',
+      priority: -2,
+      render2D: (ctx: CanvasRenderingContext2D) => {
+        ctx.save();
+        ctx.fillStyle = '#000';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        times.forEach((time, i) => {
+          if (i % 10 === 0) { // Sparse ticks
+            const x = this.computeScaleX(i);
+            ctx.fillText(new Date(time).toLocaleTimeString(), x, this.height + 5);
+          }
+        });
+        ctx.restore();
+      },
+      renderGPU: () => {},
+    });
+
+    // Price Axis Plugin
+    this.plugins.register({
+      name: 'PriceAxis',
+      priority: -1,
+      render2D: (ctx: CanvasRenderingContext2D) => {
+        ctx.save();
+        ctx.fillStyle = '#000';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        const range = this.priceScale.maxPrice - this.priceScale.minPrice;
+        const tickCount = Math.floor(this.height / this.priceScale.pixelPerTick);
+        for (let i = 0; i <= tickCount; i++) {
+          const price = this.priceScale.minPrice + (i / tickCount) * range;
+          const y = this.computeScaleY(price);
+          ctx.fillText(price.toFixed(2), this.width - 5, y);
+        }
+        ctx.restore();
+      },
+      renderGPU: () => {},
+    });
+
+    // Indicators
+    if (this.indicators.vwap) {
+      this.plugins.register(new VWAPOverlay(candles, this.device, this.width, this.height));
+    }
+    if (this.indicators.hybridMA) {
+      this.plugins.register(new HybridMAOverlay(prices, this.device, this.width, this.height));
+    }
+    if (this.indicators.ichimoku) {
+      this.plugins.register(new IchimokuCloud(highs, lows, candles.length, this.device, this.width, this.height));
+    }
+    if (this.indicators.alma) {
+      this.plugins.register(new ALMAOverlay(candles, this.width, this.height, this.device));
+    }
+    if (this.indicators.stochasticRSI) {
+      this.plugins.register(new StochasticRSIOverlay(prices, this.width, this.height, 1));
+    }
+    if (this.indicators.bollinger) {
+      this.plugins.register(new BollingerBandRenderer());
+    }
+    if (this.indicators.atrHeatmap) {
+      this.plugins.register(new ATRHeatmapRenderer(Float32Array.from(atrValues), 0.6, 1.5, this.device));
+    }
+    if (this.indicators.adr) {
+      this.plugins.register(new ADRIndicator(candles));
+    }
+    if (this.indicators.macd) {
+      this.plugins.register(new MACDIndicator(prices, this.width, 100, 1));
+    }
+    if (this.indicators.mcginley) {
+      const mcginley = createMcGinleyDynamic(closes, Float32Array.from(volatility));
+      this.plugins.register({
+        name: 'McGinleyDynamic',
+        priority: 0,
+        render2D: (ctx: CanvasRenderingContext2D) => {
+          ctx.save();
+          ctx.beginPath();
+          mcginley.md.forEach((v, i) => {
+            const x = this.computeScaleX(i);
+            const y = this.computeScaleY(v);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.strokeStyle = '#ff5722';
+          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = 0.8;
+          ctx.stroke();
+          ctx.restore();
+        },
+        renderGPU: () => {},
+      });
+    }
+    if (this.indicators.supertrend) {
+      this.plugins.register(new SupertrendOverlay(candles, this.device, this.width, this.height));
+    }
+
+    // Pattern Engines
+    if (this.indicators.candlePatterns) {
+      this.plugins.register({
+        name: 'CandlePatterns',
+        priority: 0,
+        render2D: (ctx: CanvasRenderingContext2D) => {
+          ctx.save();
+          candles.forEach((_, i) => {
+            const pattern = detectCandlePatterns(candles, i);
+            if (pattern) {
+              const x = this.computeScaleX(i);
+              const y = this.computeScaleY(candles[i].close);
+              const isBullish = pattern.typeLabels.some(label => PATTERN_FLAG_MAP[label]?.isBullish);
+              ctx.fillStyle = isBullish ? 'rgba(0, 255, 0, 0.5)' : 'rgba(255, 0, 0, 0.5)';
+              ctx.fillRect(x - 5, y - 5, 10, 10);
+            }
+          });
+          ctx.restore();
+        },
+        renderGPU: () => {},
+        onEvent: (event: string, data: any) => {
+          if (event === 'click' && 'x' in data) {
+            const index = Math.floor(this.computeUnscaleX(data.x));
+            const pattern = detectCandlePatterns(candles, index);
+            if (pattern) {
+              console.log(`Clicked pattern at index ${index} (CandlePatterns): ${pattern.typeLabels.join(', ')}`);
+            }
+          }
+        },
+      });
+    }
+
+    if (this.indicators.patternEngine) {
+      const patternEngine = new PatternEngine(candles);
+      this.plugins.register({
+        name: 'PatternEngine',
+        priority: 1,
+        render2D: (ctx: CanvasRenderingContext2D) => {
+          ctx.save();
+          const results = patternEngine.run();
+          results.forEach(result => {
+            const x = this.computeScaleX(result.index);
+            const y = this.computeScaleY(candles[result.index].close);
+            const isBullish = result.typeLabels.some(label => PATTERN_FLAG_MAP[label]?.isBullish);
+            ctx.fillStyle = isBullish ? 'rgba(0, 255, 0, 0.5)' : 'rgba(255, 0, 0, 0.5)';
+            ctx.beginPath();
+            ctx.arc(x, y, 5, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.restore();
+        },
+        renderGPU: () => {},
+        onEvent: (event: string, data: any) => {
+          if (event === 'click' && 'x' in data) {
+            const index = Math.floor(this.computeUnscaleX(data.x));
+            const result = patternEngine.getResults().find(r => r.index === index);
+            if (result) {
+              console.log(`Clicked pattern at index ${index} (PatternEngine): ${result.typeLabels.join(', ')}`);
+            }
+          }
+        },
+      });
+    }
+
+    if (this.indicators.patternEngineGPU && this.device) {
+      const patternEngineGPU = new PatternEngineGPU(this.device);
+      patternEngineGPU.initialize(candles).then(() => {
+        this.plugins.register({
+          name: 'PatternEngineGPU',
+          priority: 2,
+          render2D: async (ctx: CanvasRenderingContext2D) => {
+            ctx.save();
+            const matches = await patternEngineGPU.compute();
+            matches.forEach(match => {
+              const x = this.computeScaleX(match.index);
+              const y = this.computeScaleY(candles[match.index].close);
+              const isBullish = match.typeLabels.some(label => PATTERN_FLAG_MAP[label]?.isBullish);
+              ctx.fillStyle = isBullish ? 'rgba(0, 255, 0, 0.5)' : 'rgba(255, 0, 0, 0.5)';
+              ctx.beginPath();
+              ctx.arc(x, y, 5, 0, Math.PI * 2);
+              ctx.fill();
+            });
+            ctx.restore();
+          },
+          renderGPU: async () => {},
+          onEvent: async (event: string, data: any) => {
+            if (event === 'click' && 'x' in data) {
+              const index = Math.floor(this.computeUnscaleX(data.x));
+              const matches = await patternEngineGPU.compute();
+              const match = matches.find(m => m.index === index);
+              if (match) {
+                console.log(`Clicked pattern at index ${index} (PatternEngineGPU): ${match.typeLabels.join(', ')}`);
+              }
+            }
+          },
+          destroy: () => {
+            patternEngineGPU.dispose();
+          },
+        });
+      }).catch(error => {
+        console.error(`PatternEngineGPU initialization failed: ${error.message}`);
+      });
+    }
+
+    if (this.indicators.patternEngineNextGen) {
+      this.plugins.register({
+        name: 'PatternEngineNextGen',
+        priority: 3,
+        render2D: (ctx: CanvasRenderingContext2D) => {
+          ctx.save();
+          const result = computePatternEngineNextGen(candles);
+          result.clusters.forEach(cluster => {
+            const x = this.computeScaleX(cluster.index);
+            const y = this.computeScaleY(candles[cluster.index].close);
+            ctx.fillStyle = cluster.clusterType === 'Bullish Momentum Cluster' ? 'rgba(0, 255, 0, 0.5)' : 'rgba(255, 0, 0, 0.5)';
+            ctx.beginPath();
+            ctx.arc(x, y, 5 * cluster.confidenceScore, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          result.structures.forEach(structure => {
+            const x = this.computeScaleX(structure.index);
+            const y = this.computeScaleY(structure.type === 'Swing High' ? candles[structure.index].high : candles[structure.index].low);
+            ctx.fillStyle = structure.strength === 'Major' ? 'rgba(255, 165, 0, 0.8)' : 'rgba(255, 165, 0, 0.4)';
+            ctx.fillRect(x - 3, y - 3, 6, 6);
+          });
+          ctx.restore();
+        },
+        renderGPU: () => {},
+        onEvent: (event: string, data: any) => {
+          if (event === 'click' && 'x' in data) {
+            const index = Math.floor(this.computeUnscaleX(data.x));
+            const result = computePatternEngineNextGen(candles);
+            const cluster = result.clusters.find(c => c.index === index);
+            const structure = result.structures.find(s => s.index === index);
+            const embedding = result.embeddings.find(e => e.index === index);
+            if (cluster || structure || embedding) {
+              console.log(`Clicked pattern at index ${index} (PatternEngineNextGen):`, {
+                cluster: cluster ? `${cluster.clusterType} (Confidence: ${cluster.confidenceScore})` : null,
+                structure: structure ? `${structure.type} (${structure.strength})` : null,
+                embedding: embedding ? `Similar to ${embedding.similarTo}` : null,
+              });
+            }
+          }
+        },
+      });
+    }
+
+    if (this.indicators.patternWorker) {
+      this.plugins.register({
+        name: 'PatternWorker',
+        priority: 4,
+        render2D: (ctx: CanvasRenderingContext2D) => {
+          ctx.save();
+          workerResults.forEach(result => {
+            const x = this.computeScaleX(result.index);
+            const y = this.computeScaleY(candles[result.index].close);
+            const isBullish = result.typeLabels.some(label => PATTERN_FLAG_MAP[label]?.isBullish);
+            ctx.fillStyle = isBullish ? 'rgba(0, 255, 0, 0.7)' : 'rgba(255, 0, 0, 0.7)';
+            ctx.beginPath();
+            ctx.arc(x, y, 6, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.restore();
+        },
+        renderGPU: () => {},
+        onEvent: (event: string, data: any) => {
+          if (event === 'click' && 'x' in data) {
+            const index = Math.floor(this.computeUnscaleX(data.x));
+            const result = workerResults.find(r => r.index === index);
+            if (result) {
+              console.log(`Clicked pattern at index ${index} (PatternWorker): ${result.typeLabels.join(', ')}`);
+            }
+          }
+        },
+      });
+    }
+
+    if (this.indicators.patternOverlay) {
+      this.plugins.register(createPatternOverlayPlugin({
+        patterns: workerResults,
+        scaleX: this.computeScaleX.bind(this),
+        scaleY: this.computeScaleY.bind(this),
+        candles,
+        lodLevel: 1,
+      }));
+    }
+
+    this.plugins.register(createDrawingToolsPlugin({
+      tools: this.toolManager.getTools(),
+      candles,
+      scaleX: this.computeScaleX.bind(this),
+      scaleY: this.computeScaleY.bind(this),
+      unscaleX: this.computeUnscaleX.bind(this),
+      unscaleY: this.computeUnscaleY.bind(this),
+    }));
+  }
+
   private computeScaleX(index: number): number {
     return (index - (this.timeScale.offset || 0)) * this.timeScale.candleWidth + this.timeScale.candleWidth / 2;
   }
 
-  /**
-   * Computes y-coordinate from price.
-   * @private
-   */
   private computeScaleY(price: number): number {
     const range = this.priceScale.maxPrice - this.priceScale.minPrice;
     return this.height - ((price - this.priceScale.minPrice) / range) * this.height;
   }
 
-  /**
-   * Computes candle index from x-coordinate.
-   * @private
-   */
   private computeUnscaleX(x: number): number {
     return Math.round(x / this.timeScale.candleWidth + (this.timeScale.offset || 0));
   }
 
-  /**
-   * Computes price from y-coordinate.
-   * @private
-   */
   private computeUnscaleY(y: number): number {
     const range = this.priceScale.maxPrice - this.priceScale.minPrice;
     return this.priceScale.minPrice + ((this.height - y) / this.height) * range;
   }
 
-  /**
-   * Initializes the chart engine.
-   * @throws Error if initialization fails.
-   */
   async initialize(): Promise<void> {
     if (this.isInitialized) {
       console.warn('ChartEngineCore already initialized');
@@ -315,7 +611,7 @@ export class ChartEngineCore {
     this.updateCanvasDimensions();
     try {
       if (this.useGPU) {
-        console.warn('GPU rendering not implemented; using 2D canvas');
+        console.warn('GPU rendering not implemented except for PatternEngineGPU');
       }
       if (this.options.config) {
         await this.init(this.options.config);
@@ -329,10 +625,6 @@ export class ChartEngineCore {
     }
   }
 
-  /**
-   * Updates canvas dimensions based on width, height, and DPR.
-   * @private
-   */
   private updateCanvasDimensions(): void {
     this.canvas.width = this.width * this.dpr;
     this.canvas.height = this.height * this.dpr;
@@ -343,24 +635,16 @@ export class ChartEngineCore {
     this.renderer.setCanvasSize(this.width, this.height);
   }
 
-  /**
-   * Starts the throttled animation loop for rendering.
-   * @private
-   */
   private startLoop(): void {
     const loop = throttle(() => {
       if (!this.isPaused && this.isInitialized) {
         this.render();
       }
       this.animationFrame = requestAnimationFrame(loop);
-    }, 16); // ~60fps
+    }, 16);
     loop();
   }
 
-  /**
-   * Renders the chart and tools using offscreen canvas, respecting isFinal.
-   * @private
-   */
   private render(): void {
     if (!this.isInitialized || !this.currentConfig) {
       console.warn('Cannot render: ChartEngineCore not initialized or no config');
@@ -370,18 +654,22 @@ export class ChartEngineCore {
       const ctx = this.offscreenCanvas!.getContext('2d')!;
       ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       const candles = this.currentConfig.candles.filter(candle => candle.isFinal !== false);
-      this.renderer.renderCandles(candles, ctx, this.timeScale, this.priceScale);
+      this.renderer.renderCandles(
+        candles,
+        ctx,
+        this.timeScale,
+        this.priceScale,
+        this.computeScaleX.bind(this),
+        this.computeScaleY.bind(this)
+      );
       this.toolManager.renderTools(ctx);
+      this.plugins.render(ctx);
       this.canvas.getContext('2d')!.drawImage(this.offscreenCanvas!, 0, 0);
     } catch (error) {
       console.error(`Render failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  /**
-   * Validates a single candlestick data point.
-   * @private
-   */
   private validateCandle(candle: Candle): void {
     const { open, high, low, close, volume, time, symbol, timeframe, isFinal } = candle;
     if (!Number.isFinite(open) || open < 0) throw new Error('Invalid open price');
@@ -393,16 +681,11 @@ export class ChartEngineCore {
     if (low > high) throw new Error('Low price cannot exceed high price');
     if (open < low || open > high) throw new Error('Open price must be between low and high');
     if (close < low || close > high) throw new Error('Close price must be between low and high');
-    if (symbol !== undefined && typeof symbol !== 'string') throw new Error('Invalid symbol: must be a string');
-    if (timeframe !== undefined && typeof timeframe !== 'string') throw new Error('Invalid timeframe: must be a string');
-    if (isFinal !== undefined && typeof isFinal !== 'boolean') throw new Error('Invalid isFinal: must be a boolean');
+    if (symbol !== undefined && typeof symbol !== 'string') throw new Error('Invalid symbol');
+    if (timeframe !== undefined && typeof timeframe !== 'string') throw new Error('Invalid timeframe');
+    if (isFinal !== undefined && typeof isFinal !== 'boolean') throw new Error('Invalid isFinal');
   }
 
-  /**
-   * Fetches chart data from a URL and updates symbol/timeframe.
-   * @param url Data endpoint.
-   * @returns Chart configuration.
-   */
   async fetchData(url: string): Promise<ChartConfig> {
     try {
       const response = await fetch(url);
@@ -420,27 +703,13 @@ export class ChartEngineCore {
           throw new Error(`Invalid candle at index ${index}: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
       });
-      const config: ChartConfig = {
-        candles: data.candles,
-        symbol,
-        timeframe,
-      };
-      if (symbol !== this.currentSymbol || timeframe !== this.currentTimeframe) {
-        this.currentSymbol = symbol;
-        this.currentTimeframe = timeframe;
-        this.updateGUI();
-        this.context.emit?.('metadataUpdated', { symbol, timeframe });
-      }
+      const config: ChartConfig = { candles: data.candles, symbol, timeframe };
       return config;
     } catch (error) {
       throw new Error(`Failed to fetch chart data: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  /**
-   * Initializes the chart with a configuration or URL.
-   * @param urlOrConfig Chart configuration or data URL.
-   */
   async init(urlOrConfig: string | ChartConfig): Promise<void> {
     const config = typeof urlOrConfig === 'string' ? await this.fetchData(urlOrConfig) : urlOrConfig;
     validateChartConfig(config);
@@ -449,17 +718,21 @@ export class ChartEngineCore {
     this.currentTimeframe = config.timeframe || null;
     this.updateGUI();
     this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
-    this.renderer.renderCandles(config.candles, this.canvas.getContext('2d')!, this.timeScale, this.priceScale);
+    this.renderer.renderCandles(
+      config.candles,
+      this.canvas.getContext('2d')!,
+      this.timeScale,
+      this.priceScale,
+      this.computeScaleX.bind(this),
+      this.computeScaleY.bind(this)
+    );
+    this.setupPlugins();
     this.plugins.initialize();
     this.eventManager.setChartMode(this.isChartMode);
     this.toolManager.setChartMode(this.isChartMode);
     this.context.emit?.('chartInitialized', { config });
   }
 
-  /**
-   * Renders the chart with a configuration.
-   * @param config Chart configuration.
-   */
   render(config: ChartConfig): void {
     validateChartConfig(config);
     this.currentConfig = config;
@@ -469,14 +742,19 @@ export class ChartEngineCore {
       this.updateGUI();
       this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
     }
-    this.renderer.renderCandles(config.candles, this.canvas.getContext('2d')!, this.timeScale, this.priceScale);
+    this.renderer.renderCandles(
+      config.candles,
+      this.canvas.getContext('2d')!,
+      this.timeScale,
+      this.priceScale,
+      this.computeScaleX.bind(this),
+      this.computeScaleY.bind(this)
+    );
+    this.setupPlugins();
+    this.plugins.render(this.canvas.getContext('2d')!);
     this.context.emit?.('chartRendered', { config });
   }
 
-  /**
-   * Updates the chart with a new configuration.
-   * @param config Chart configuration.
-   */
   update(config: ChartConfig): void {
     validateChartConfig(config);
     this.currentConfig = config;
@@ -486,33 +764,29 @@ export class ChartEngineCore {
       this.updateGUI();
       this.context.emit?.('metadataUpdated', { symbol: this.currentSymbol, timeframe: this.currentTimeframe });
     }
-    this.renderer.updateCandles(config.candles, this.canvas.getContext('2d')!, this.timeScale, this.priceScale);
+    this.renderer.updateCandles(
+      config.candles,
+      this.canvas.getContext('2d')!,
+      this.timeScale,
+      this.priceScale,
+      this.computeScaleX.bind(this),
+      this.computeScaleY.bind(this)
+    );
+    this.setupPlugins();
+    this.plugins.render(this.canvas.getContext('2d')!);
     this.context.emit?.('chartUpdated', { config });
   }
 
-  /**
-   * Registers a plugin with the chart engine.
-   * @param plugin The plugin to register.
-   */
   addPlugin(plugin: ChartPlugin): void {
     this.plugins.register(plugin);
     this.context.emit?.('pluginAdded', { plugin });
   }
 
-  /**
-   * Adds an event listener for chart events.
-   * @param type Event type.
-   * @param callback Event handler.
-   */
   addEventListener(type: string, callback: Function): void {
     this.eventManager.on(type as any, callback as any);
     this.context.emit?.('eventListenerAdded', { type });
   }
 
-  /**
-   * Sets chart or draw mode.
-   * @param isChartMode True for chart mode, false for draw mode.
-   */
   setChartMode(isChartMode: boolean): void {
     this.isChartMode = isChartMode;
     this.eventManager.setChartMode(isChartMode);
@@ -520,10 +794,6 @@ export class ChartEngineCore {
     this.context.emit?.('modeChanged', { isChartMode });
   }
 
-  /**
-   * Updates chart engine options dynamically.
-   * @param options Partial options to update.
-   */
   updateOptions(options: Partial<ChartEngineOptions>): void {
     let needsReinitialize = false;
 
@@ -567,6 +837,11 @@ export class ChartEngineCore {
       this.timeScale = { ...this.timeScale, ...options.timeScale };
     }
 
+    if (options.indicators) {
+      this.indicators = { ...this.indicators, ...options.indicators };
+      this.setupPlugins();
+    }
+
     if (needsReinitialize && this.isInitialized) {
       this.destroy();
       this.initialize().catch(error => {
@@ -578,9 +853,6 @@ export class ChartEngineCore {
     }
   }
 
-  /**
-   * Undoes the last tool action.
-   */
   undo(): void {
     if (this.undoStack.length <= 1) return;
     const currentState = this.undoStack.pop()!;
@@ -590,9 +862,6 @@ export class ChartEngineCore {
     this.context.emit?.('undo', { tools: previousState.tools });
   }
 
-  /**
-   * Redoes the last undone tool action.
-   */
   redo(): void {
     if (this.redoStack.length === 0) return;
     const nextState = this.redoStack.pop()!;
@@ -601,10 +870,6 @@ export class ChartEngineCore {
     this.context.emit?.('redo', { tools: nextState.tools });
   }
 
-  /**
-   * Serializes the current chart and tool state.
-   * @returns JSON string of the state.
-   */
   serializeState(): string {
     try {
       return JSON.stringify({
@@ -619,10 +884,6 @@ export class ChartEngineCore {
     }
   }
 
-  /**
-   * Deserializes and restores chart and tool state.
-   * @param state JSON string of the state.
-   */
   deserializeState(state: string): void {
     try {
       const { config, tools, symbol, timeframe } = JSON.parse(state);
@@ -644,52 +905,25 @@ export class ChartEngineCore {
     }
   }
 
-  /**
-   * Pauses the animation loop.
-   */
   pause(): void {
     this.isPaused = true;
     this.context.emit?.('paused', {});
   }
 
-  /**
-   * Resumes the animation loop.
-   */
   resume(): void {
     this.isPaused = false;
     this.context.emit?.('resumed', {});
   }
 
-  /**
-   * Cleans up resources and stops the chart engine.
-   */
   destroy(): void {
     if (!this.isInitialized) return;
 
     cancelAnimationFrame(this.animationFrame);
-    this.animationFrame = 0;
-
-    try {
-      this.eventManager.detach();
-    } catch (error) {
-      console.warn(`Event manager cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-
-    try {
-      this.plugins.destroy();
-    } catch (error) {
-      console.warn(`Plugin cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-
-    try {
-      this.toolManager.destroy();
-    } catch (error) {
-      console.warn(`Tool manager cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-
+    this.eventManager.detach();
+    this.plugins.destroy();
+    this.toolManager.destroy();
     const gui = this.context.getContainer?.().querySelector('[role="toolbar"]');
     if (gui) gui.remove();
-
     this.canvas.width = 0;
     this.canvas.height = 0;
     this.offscreenCanvas = null;
