@@ -1,6 +1,9 @@
-import { DrawingTool, DrawingToolData, LineOptions, TextOptions, Point, LineStyle, LineEnd, BoxHorizontalAlignment, BoxVerticalAlignment, TrendLineData, RectangleData, FibonacciData, HorizontalLineData, VerticalLineData, ArrowData, BrushData, HighlighterData, CalloutData, CircleData, ExtendedLineData, ParallelChannelData, PathData, PriceRangeData, RayData, TextData } from './ChartTypes';
+import { DrawingTool, DrawingToolData, LineOptions, TextOptions, Point, LineStyle, LineEnd, BoxHorizontalAlignment, BoxVerticalAlignment, TrendLineData, RectangleData, FibonacciData, HorizontalLineData, VerticalLineData, ArrowData, BrushData, HighlighterData, CalloutData, CircleData, ExtendedLineData, ParallelChannelData, PathData, PriceRangeData, RayData, TextData, Tick, CrosshairEvent } from './ChartTypes';
 import { v4 as uuidv4 } from 'uuid';
 import { debounce, memoize } from 'lodash';
+import { CrosshairManager } from './CrosshairManager';
+import { ChartWidget } from './ChartWidget';
+import { KineticAnimation } from './KineticAnimation';
 
 const FIB_LEVELS = [
   { percent: '0.0%', level: 0 },
@@ -16,6 +19,7 @@ interface InteractionData {
   y: number;
   index: number;
   price: number;
+  time: number;
   tool?: string | null;
 }
 
@@ -33,75 +37,91 @@ const defaultTextOptions: TextOptions = {
   box: { alignment: { vertical: BoxVerticalAlignment.Middle, horizontal: BoxHorizontalAlignment.Center }, angle: 0, scale: 1, padding: 2 },
 };
 
-/**
- * Normalizes event coordinates relative to the canvas.
- */
 function normalizeEventCoordinates(event: MouseEvent | TouchEvent, canvas: HTMLCanvasElement): { x: number; y: number } {
   const rect = canvas.getBoundingClientRect();
   const clientX = 'touches' in event ? event.touches[0].clientX : event.clientX;
   const clientY = 'touches' in event ? event.touches[0].clientY : event.clientY;
   return {
-    x: Math.max(0, Math.min(canvas.width, clientX - rect.left)),
-    y: Math.max(0, Math.min(canvas.height, clientY - rect.top)),
+    x: Math.max(0, Math.min(canvas.width, (clientX - rect.left) * devicePixelRatio)),
+    y: Math.max(0, Math.min(canvas.height, (clientY - rect.top) * devicePixelRatio)),
   };
 }
 
-/**
- * Validates tool data against expected structure.
- */
 function validateToolData(data: DrawingToolData): void {
-  if (!data || !data.id) throw new Error('Tool data or ID is missing');
+  if (!data || !data.id || typeof data.id !== 'string') throw new Error('Tool data or ID is missing');
+  if (!data.type || !['trendline', 'rectangle', 'fibonacci', 'horizontalLine', 'verticalLine', 'arrow', 'brush', 'highlighter', 'callout', 'circle', 'extendedLine', 'parallelChannel', 'path', 'priceRange', 'ray', 'text'].includes(data.type)) {
+    throw new Error(`Invalid tool type: ${data.type}`);
+  }
+  // Validate numeric fields
+  const validateNumber = (value: any, field: string) => {
+    if (value !== undefined && !Number.isFinite(value)) throw new Error(`Invalid ${field} in ${data.type}`);
+  };
   switch (data.type) {
     case 'trendline':
     case 'arrow':
     case 'extendedLine':
     case 'ray':
-      if (!('startIndex' in data && 'startPrice' in data && 'endIndex' in data && 'endPrice' in data)) {
-        throw new Error(`Invalid ${data.type} data`);
-      }
-      break;
     case 'rectangle':
     case 'priceRange':
-      if (!('startIndex' in data && 'startPrice' in data && 'endIndex' in data && 'endPrice' in data)) {
-        throw new Error(`Invalid ${data.type} data`);
-      }
+      validateNumber(data.startIndex, 'startIndex');
+      validateNumber(data.startPrice, 'startPrice');
+      validateNumber(data.endIndex, 'endIndex');
+      validateNumber(data.endPrice, 'endPrice');
       break;
     case 'fibonacci':
-      if (!('startIndex' in data && 'startPrice' in data && 'endIndex' in data && 'endPrice' in data && 'levels' in data)) {
-        throw new Error('Invalid fibonacci data');
-      }
+      validateNumber(data.startIndex, 'startIndex');
+      validateNumber(data.startPrice, 'startPrice');
+      validateNumber(data.endIndex, 'endIndex');
+      validateNumber(data.endPrice, 'endPrice');
+      if (!Array.isArray(data.levels) || data.levels.some(l => !Number.isFinite(l.price))) throw new Error('Invalid fibonacci levels');
       break;
     case 'horizontalLine':
-      if (!('price' in data)) throw new Error('Invalid horizontalLine data');
+      validateNumber(data.price, 'price');
       break;
     case 'verticalLine':
-      if (!('index' in data)) throw new Error('Invalid verticalLine data');
+      validateNumber(data.index, 'index');
       break;
     case 'brush':
     case 'highlighter':
     case 'path':
-      if (!('points' in data)) throw new Error(`Invalid ${data.type} data`);
+      if (!Array.isArray(data.points) || data.points.some(p => !Number.isFinite(p.index) || !Number.isFinite(p.price))) {
+        throw new Error(`Invalid points in ${data.type}`);
+      }
       break;
     case 'callout':
-      if (!('index' in data && 'price' in data && 'targetIndex' in data && 'targetPrice' in data)) {
-        throw new Error('Invalid callout data');
-      }
+      validateNumber(data.index, 'index');
+      validateNumber(data.price, 'price');
+      validateNumber(data.targetIndex, 'targetIndex');
+      validateNumber(data.targetPrice, 'targetPrice');
       break;
     case 'circle':
-      if (!('centerIndex' in data && 'centerPrice' in data && 'radiusIndex' in data && 'radiusPrice' in data)) {
-        throw new Error('Invalid circle data');
-      }
+      validateNumber(data.centerIndex, 'centerIndex');
+      validateNumber(data.centerPrice, 'centerPrice');
+      validateNumber(data.radiusIndex, 'radiusIndex');
+      validateNumber(data.radiusPrice, 'radiusPrice');
       break;
     case 'parallelChannel':
-      if (!('line1StartIndex' in data && 'line1StartPrice' in data && 'line1EndIndex' in data && 'line1EndPrice' in data && 'line2OffsetPrice' in data)) {
-        throw new Error('Invalid parallelChannel data');
-      }
+      validateNumber(data.line1StartIndex, 'line1StartIndex');
+      validateNumber(data.line1StartPrice, 'line1StartPrice');
+      validateNumber(data.line1EndIndex, 'line1EndIndex');
+      validateNumber(data.line1EndPrice, 'line1EndPrice');
+      validateNumber(data.line2OffsetPrice, 'line2OffsetPrice');
       break;
     case 'text':
-      if (!('index' in data && 'price' in data && 'text' in data)) throw new Error('Invalid text data');
+      validateNumber(data.index, 'index');
+      validateNumber(data.price, 'price');
+      if (typeof data.text?.value !== 'string') throw new Error('Invalid text value');
       break;
-    default:
-      throw new Error(`Unknown tool type: ${data.type}`);
+  }
+  // Validate line and text options
+  if (data.line) {
+    if (!data.line.color || typeof data.line.color !== 'string') throw new Error(`Invalid line color in ${data.type}`);
+    validateNumber(data.line.width, 'line.width');
+  }
+  if (data.text && data.text.value !== '') {
+    if (!data.text.font || typeof data.text.font.color !== 'string' || !Number.isFinite(data.text.font.size)) {
+      throw new Error(`Invalid text font in ${data.type}`);
+    }
   }
 }
 
@@ -115,17 +135,41 @@ export class DrawingToolManager {
   private isDrawing: boolean;
   private canvas: HTMLCanvasElement | null;
   private ctx: CanvasRenderingContext2D | null;
+  private gl: WebGL2RenderingContext | null;
+  private widget: ChartWidget | null;
+  private crosshairManager: CrosshairManager | null;
+  private kineticAnimation: KineticAnimation | null;
   private undoStack: DrawingTool[][] = [];
   private redoStack: DrawingTool[][] = [];
   private scaleX: (index: number) => number;
   private scaleY: (price: number) => number;
   private unscaleX: (x: number) => number;
   private unscaleY: (y: number) => number;
+  private timeToIndex: (time: number) => number;
+  private ticks: Float32Array | null;
+  private highlightedToolId: string | null;
 
-  constructor(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, setTools: (tools: DrawingTool[]) => void, scaleX: (index: number) => number, scaleY: (price: number) => number, unscaleX: (x: number) => number, unscaleY: (y: number) => number) {
-    if (!canvas || !ctx || !setTools) throw new Error('Canvas, context, or setTools is missing');
+  constructor(
+    canvas: HTMLCanvasElement,
+    ctx: CanvasRenderingContext2D,
+    gl: WebGL2RenderingContext | null,
+    widget: ChartWidget,
+    crosshairManager: CrosshairManager,
+    setTools: (tools: DrawingTool[]) => void,
+    scaleX: (index: number) => number,
+    scaleY: (price: number) => number,
+    unscaleX: (x: number) => number,
+    unscaleY: (y: number) => number,
+    timeToIndex: (time: number) => number
+  ) {
+    if (!canvas || !ctx || !widget || !crosshairManager || !setTools) {
+      throw new Error('Canvas, context, widget, crosshair manager, or setTools is missing');
+    }
     this.canvas = canvas;
     this.ctx = ctx;
+    this.gl = gl;
+    this.widget = widget;
+    this.crosshairManager = crosshairManager;
     this.tools = [];
     this.setTools = setTools;
     this.activeTool = null;
@@ -137,22 +181,29 @@ export class DrawingToolManager {
     this.scaleY = memoize(scaleY);
     this.unscaleX = unscaleX;
     this.unscaleY = unscaleY;
+    this.timeToIndex = timeToIndex;
+    this.ticks = null;
+    this.highlightedToolId = null;
+    this.kineticAnimation = new KineticAnimation(this.handleKineticMove.bind(this));
     this.setupEventListeners();
   }
 
   private setupEventListeners(): void {
     if (!this.canvas) return;
     this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
-    this.canvas.addEventListener('mousemove', debounce(this.handleMouseMove.bind(this), 10));
+    this.canvas.addEventListener('mousemove', debounce(this.handleMouseMove.bind(this), 5));
     this.canvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
     this.canvas.addEventListener('touchstart', this.handleTouchStart.bind(this));
-    this.canvas.addEventListener('touchmove', debounce(this.handleTouchMove.bind(this), 10));
+    this.canvas.addEventListener('touchmove', debounce(this.handleTouchMove.bind(this), 5));
     this.canvas.addEventListener('touchend', this.handleTouchEnd.bind(this));
     this.canvas.addEventListener('contextmenu', this.handleContextMenu.bind(this));
+    this.canvas.addEventListener('wheel', this.handleWheel.bind(this));
+    this.crosshairManager?.on('crosshair', this.handleCrosshair.bind(this));
   }
 
   setActiveTool(tool: string | null): boolean {
-    if (tool && !['trendline', 'rectangle', 'fibonacci', 'horizontalLine', 'verticalLine', 'arrow', 'brush', 'highlighter', 'callout', 'circle', 'extendedLine', 'parallelChannel', 'path', 'priceRange', 'ray', 'text'].includes(tool)) {
+    const validTools = ['trendline', 'rectangle', 'fibonacci', 'horizontalLine', 'verticalLine', 'arrow', 'brush', 'highlighter', 'callout', 'circle', 'extendedLine', 'parallelChannel', 'path', 'priceRange', 'ray', 'text', 'select'];
+    if (tool && !validTools.includes(tool)) {
       console.warn(`Unknown tool: ${tool}`);
       return false;
     }
@@ -161,96 +212,121 @@ export class DrawingToolManager {
     this.selectedToolId = null;
     this.editingPoint = null;
     this.isDrawing = false;
+    this.canvas!.style.cursor = tool && tool !== 'select' ? 'crosshair' : 'default';
     return true;
   }
 
   setStrokeColor(color: string): void {
+    if (!/^#[0-9A-F]{6}$/i.test(color)) return;
     if (this.creatingTool && this.creatingTool.line) {
       this.creatingTool.line.color = color;
     }
-    this.tools = this.tools.map(t => {
-      if (t.id === this.selectedToolId && t.data.line) {
-        return { ...t, data: { ...t.data, line: { ...t.data.line, color } } };
-      }
-      return t;
-    });
-    this.setTools([...this.tools]);
+    this.updateSelectedTool({ line: { color } });
   }
 
   setLineWidth(width: number): void {
-    if (width <= 0) return;
+    if (!Number.isFinite(width) || width <= 0) return;
     if (this.creatingTool && this.creatingTool.line) {
       this.creatingTool.line.width = width;
     }
-    this.tools = this.tools.map(t => {
-      if (t.id === this.selectedToolId && t.data.line) {
-        return { ...t, data: { ...t.data, line: { ...t.data.line, width } } };
-      }
-      return t;
-    });
-    this.setTools([...this.tools]);
+    this.updateSelectedTool({ line: { width } });
   }
 
   setFillColor(color: string): void {
+    if (!/^#[0-9A-F]{6}$/i.test(color)) return;
     if (this.creatingTool && this.creatingTool.fill) {
       this.creatingTool.fill.color = color;
     }
-    this.tools = this.tools.map(t => {
-      if (t.id === this.selectedToolId && t.data.fill) {
-        return { ...t, data: { ...t.data, fill: { ...t.data.fill, color } } };
-      }
-      return t;
-    });
-    this.setTools([...this.tools]);
+    this.updateSelectedTool({ fill: { color } });
   }
 
   setChartMode(isChartMode: boolean): void {
     this.isDrawing = !isChartMode;
+    this.canvas!.style.cursor = isChartMode ? 'default' : this.activeTool && this.activeTool !== 'select' ? 'crosshair' : 'pointer';
+  }
+
+  setTicks(ticks: Tick[]): void {
+    this.ticks = new Float32Array(ticks.length * 3);
+    ticks.forEach((tick, i) => {
+      this.ticks![i * 3] = tick.price;
+      this.ticks![i * 3 + 1] = tick.time;
+      this.ticks![i * 3 + 2] = tick.volume;
+    });
+  }
+
+  private updateSelectedTool(updates: Partial<DrawingToolData>): void {
+    if (!this.selectedToolId) return;
+    this.tools = this.tools.map(t => {
+      if (t.id === this.selectedToolId) {
+        const newData = { ...t.data };
+        if (updates.line && t.data.line) newData.line = { ...t.data.line, ...updates.line };
+        if (updates.fill && t.data.fill) newData.fill = { ...t.data.fill, ...updates.fill };
+        if (updates.text && t.data.text) newData.text = { ...t.data.text, ...updates.text };
+        return { ...t, data: newData };
+      }
+      return t;
+    });
+    this.saveState();
   }
 
   private handleMouseDown(event: MouseEvent): void {
     if (!this.canvas) return;
+    event.preventDefault();
     const data = this.getInteractionData(event);
+    this.kineticAnimation?.start(data.x);
     this.handleInteraction('mousedown', data);
   }
 
   private handleMouseMove(event: MouseEvent): void {
     if (!this.canvas) return;
     const data = this.getInteractionData(event);
+    this.kineticAnimation?.update(data.x);
     this.handleInteraction('mousemove', data);
   }
 
   private handleMouseUp(event: MouseEvent): void {
     if (!this.canvas) return;
     const data = this.getInteractionData(event);
+    this.kineticAnimation?.stop();
     this.handleInteraction('mouseup', data);
   }
 
-  private handleTouchStart(event: Event): void {
+  private handleTouchStart(event: TouchEvent): void {
     if (!this.canvas) return;
-    const data = this.getInteractionData(event as TouchEvent);
+    event.preventDefault();
+    const data = this.getInteractionData(event);
+    this.kineticAnimation?.start(data.x);
     this.handleInteraction('mousedown', data);
-    event.preventDefault();
   }
 
-  private handleTouchMove(event: Event): void {
+  private handleTouchMove(event: TouchEvent): void {
     if (!this.canvas) return;
-    const data = this.getInteractionData(event as TouchEvent);
+    event.preventDefault();
+    const data = this.getInteractionData(event);
+    this.kineticAnimation?.update(data.x);
     this.handleInteraction('mousemove', data);
-    event.preventDefault();
   }
 
-  private handleTouchEnd(event: Event): void {
+  private handleTouchEnd(event: TouchEvent): void {
     if (!this.canvas) return;
-    const data = this.getInteractionData(event as TouchEvent);
-    this.handleInteraction('mouseup', data);
     event.preventDefault();
+    const data = this.getInteractionData(event);
+    this.kineticAnimation?.stop();
+    this.handleInteraction('mouseup', data);
+  }
+
+  private handleWheel(event: WheelEvent): void {
+    if (!this.canvas) return;
+    event.preventDefault();
+    const data = this.getInteractionData(event);
+    this.widget?.handleZoom(data.x, event.deltaY > 0 ? 0.9 : 1.1);
   }
 
   private handleContextMenu(event: MouseEvent): void {
     if (!this.canvas) return;
     event.preventDefault();
     const data = this.getInteractionData(event);
+    if (!this.selectedToolId) return;
     const menu = document.createElement('div');
     menu.style.position = 'absolute';
     menu.style.left = `${event.clientX}px`;
@@ -258,32 +334,52 @@ export class DrawingToolManager {
     menu.style.background = '#fff';
     menu.style.border = '1px solid #ccc';
     menu.style.padding = '5px';
+    menu.style.zIndex = '1000';
+    menu.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
     menu.innerHTML = `
-      <button onclick="this.closest('div').dispatchEvent(new CustomEvent('delete'))">Delete Tool</button>
-      <button onclick="this.closest('div').dispatchEvent(new CustomEvent('edit'))">Edit Properties</button>
+      <button style="display:block;width:100%;text-align:left;padding:5px;" onclick="this.closest('div').dispatchEvent(new CustomEvent('delete'))">Delete Tool</button>
+      <button style="display:block;width:100%;text-align:left;padding:5px;" onclick="this.closest('div').dispatchEvent(new CustomEvent('edit'))">Edit Properties</button>
+      <button style="display:block;width:100%;text-align:left;padding:5px;" onclick="this.closest('div').dispatchEvent(new CustomEvent('lock'))">${this.tools.find(t => t.id === this.selectedToolId)?.data.locked ? 'Unlock' : 'Lock'} Tool</button>
     `;
     menu.addEventListener('delete', () => {
-      if (this.selectedToolId) {
-        this.deleteTool(this.selectedToolId);
-      }
+      this.deleteTool(this.selectedToolId!);
       menu.remove();
     });
     menu.addEventListener('edit', () => {
-      console.log(`Edit properties for tool: ${this.selectedToolId}`);
+      this.editToolProperties(this.selectedToolId!);
+      menu.remove();
+    });
+    menu.addEventListener('lock', () => {
+      this.toggleLockTool(this.selectedToolId!);
       menu.remove();
     });
     document.body.appendChild(menu);
     document.addEventListener('click', () => menu.remove(), { once: true });
   }
 
+  private handleCrosshair(event: CrosshairEvent): void {
+    const hitTool = this.findHitTool(event.index, event.price);
+    this.highlightedToolId = hitTool?.id || null;
+    this.widget?.requestRender();
+  }
+
+  private handleKineticMove(dx: number): void {
+    if (this.isDrawing) return;
+    this.widget?.handleScroll(dx / this.scaleX(1));
+  }
+
   private getInteractionData(event: MouseEvent | TouchEvent): InteractionData {
     if (!this.canvas) throw new Error('Canvas not initialized');
     const { x, y } = normalizeEventCoordinates(event, this.canvas);
+    const index = this.unscaleX(x);
+    const price = this.unscaleY(y);
+    const time = this.ticks ? this.ticks[Math.round(index) * 3 + 1] || Date.now() : Date.now();
     return {
       x,
       y,
-      index: Math.round(this.unscaleX(x)),
-      price: this.unscaleY(y),
+      index,
+      price,
+      time,
       tool: this.activeTool,
     };
   }
@@ -305,19 +401,20 @@ export class DrawingToolManager {
           this.handleMouseUpInteraction(data.tool, data);
         }
       }
+      this.crosshairManager?.update(data.x, data.y, data.price, data.time);
     } catch (error) {
-      console.error(`Error handling interaction ${type}:`, error);
+      console.error(`Error handling interaction ${type}: ${error}`);
     }
   }
 
   private handleMouseDownInteraction(type: string, data: InteractionData): void {
-    if (type !== this.activeTool) return;
-    this.isDrawing = true;
-
+    if (type !== this.activeTool || !this.isDrawing) return;
     if (!this.creatingTool) {
       this.creatingTool = {
         id: uuidv4(),
         type,
+        zIndex: this.tools.length + 1,
+        locked: false,
         ...(type === 'horizontalLine' ? { price: data.price } :
            type === 'verticalLine' ? { index: data.index } :
            type === 'text' ? { index: data.index, price: data.price, text: { ...defaultTextOptions } } :
@@ -351,7 +448,6 @@ export class DrawingToolManager {
 
   private handleMouseMoveInteraction(type: string, data: InteractionData): void {
     if (!this.creatingTool || !this.activeTool || type !== this.activeTool) return;
-
     if (['brush', 'highlighter', 'path'].includes(type)) {
       this.creatingTool.points = [...(this.creatingTool.points || []), { index: data.index, price: data.price }];
       this.updateTool(type, data);
@@ -408,6 +504,8 @@ export class DrawingToolManager {
             })),
             text: this.creatingTool!.text,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'horizontalLine':
@@ -418,6 +516,8 @@ export class DrawingToolManager {
             line: this.creatingTool!.line!,
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'verticalLine':
@@ -428,6 +528,8 @@ export class DrawingToolManager {
             line: this.creatingTool!.line!,
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'text':
@@ -438,6 +540,8 @@ export class DrawingToolManager {
             price: data.price,
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'callout':
@@ -451,6 +555,8 @@ export class DrawingToolManager {
             text: { ...defaultTextOptions, value: 'Callout' },
             line: this.creatingTool!.line!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'brush':
@@ -461,9 +567,11 @@ export class DrawingToolManager {
             type,
             points: this.creatingTool!.points!,
             line: this.creatingTool!.line!,
-            ...(type === 'highlighter' ? { fill: { color: this.creatingTool!.line!.color, opacity: 0.3 } } : {}),
+            ...(type === 'highlighter' ? { fill: { color: this.creatingTool!.line!.color + '4D', opacity: 0.3 } } : {}),
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'parallelChannel':
@@ -479,6 +587,8 @@ export class DrawingToolManager {
             fill: this.creatingTool!.fill,
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'circle':
@@ -493,6 +603,8 @@ export class DrawingToolManager {
             fill: this.creatingTool!.fill,
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         case 'trendline':
@@ -512,6 +624,8 @@ export class DrawingToolManager {
             ...(type === 'rectangle' || type === 'priceRange' ? { fill: this.creatingTool!.fill } : {}),
             text: this.creatingTool!.text!,
             selected: true,
+            zIndex: this.creatingTool!.zIndex!,
+            locked: false,
           };
           break;
         default:
@@ -521,13 +635,12 @@ export class DrawingToolManager {
       validateToolData(toolData);
       this.tools = this.tools.map(t => ({ ...t, data: { ...t.data, selected: false } }));
       this.tools.push({ type, id: this.creatingTool!.id!, data: toolData });
-      this.undoStack.push([...this.tools]);
-      this.redoStack = [];
-      this.setTools([...this.tools]);
+      this.saveState();
       this.creatingTool = null;
       this.isDrawing = false;
+      this.widget?.requestRender();
     } catch (error) {
-      console.error(`Error finalizing tool ${type}:`, error);
+      console.error(`Error finalizing tool ${type}: ${error}`);
     }
   }
 
@@ -537,78 +650,137 @@ export class DrawingToolManager {
       this.tools.push({
         type,
         id: this.creatingTool!.id!,
-        data: { ...data } as DrawingToolData,
+        data: { ...data, zIndex: this.creatingTool!.zIndex, locked: false } as DrawingToolData,
       });
-      this.setTools([...this.tools]);
+      this.saveState();
+      this.widget?.requestRender();
     } catch (error) {
-      console.error(`Error updating tool ${type}:`, error);
+      console.error(`Error updating tool ${type}: ${error}`);
     }
   }
 
   private handleSelection(data: InteractionData): void {
-    const hitTool = this.tools.find(t => {
+    const hitTool = this.findHitTool(data.index, data.price);
+    this.tools = this.tools.map(t => ({
+      ...t,
+      data: { ...t.data, selected: t.id === hitTool?.id && !t.data.locked },
+    }));
+    this.selectedToolId = hitTool?.id && !hitTool.data.locked ? hitTool.id : null;
+    this.editingPoint = this.selectedToolId ? this.getEditingPoint(hitTool!, data.index, data.price) : null;
+    this.saveState();
+    this.widget?.requestRender();
+  }
+
+  private findHitTool(index: number, price: number): DrawingTool | null {
+    for (const t of [...this.tools].sort((a, b) => (b.data.zIndex || 0) - (a.data.zIndex || 0))) {
+      if (t.data.locked) continue;
       const d = t.data as any;
       try {
         if (['trendline', 'arrow', 'extendedLine', 'ray'].includes(t.type)) {
           const dx = d.endIndex - d.startIndex;
           const dy = d.endPrice - d.startPrice;
-          const t = ((data.index - d.startIndex) * dx + (data.price - d.startPrice) * dy) / (dx * dx + dy * dy);
+          const t = ((index - d.startIndex) * dx + (price - d.startPrice) * dy) / (dx * dx + dy * dy);
           const closestX = d.startIndex + t * dx;
           const closestY = d.startPrice + t * dy;
-          const distance = Math.sqrt(Math.pow(data.index - closestX, 2) + Math.pow(data.price - closestY, 2));
-          return distance < 2;
+          const distance = Math.hypot(index - closestX, price - closestY);
+          if (distance < 2) return t;
         } else if (['rectangle', 'priceRange'].includes(t.type)) {
           const minX = Math.min(d.startIndex, d.endIndex);
           const maxX = Math.max(d.startIndex, d.endIndex);
           const minY = Math.min(d.startPrice, d.endPrice);
           const maxY = Math.max(d.startPrice, d.endPrice);
-          return data.index >= minX && data.index <= maxX && data.price >= minY && data.price <= maxY;
+          if (index >= minX && index <= maxX && price >= minY && price <= maxY) return t;
         } else if (t.type === 'fibonacci') {
-          return Math.abs(data.index - d.startIndex) < 5 || Math.abs(data.index - d.endIndex) < 5;
+          if (Math.abs(index - d.startIndex) < 5 || Math.abs(index - d.endIndex) < 5) return t;
         } else if (t.type === 'horizontalLine') {
-          return Math.abs(data.price - d.price) < 5;
+          if (Math.abs(price - d.price) < 5) return t;
         } else if (t.type === 'verticalLine') {
-          return Math.abs(data.index - d.index) < 5;
+          if (Math.abs(index - d.index) < 5) return t;
         } else if (t.type === 'brush' || t.type === 'highlighter' || t.type === 'path') {
-          return d.points.some(p => Math.hypot(data.index - p.index, data.price - p.price) < 5);
+          if (d.points.some(p => Math.hypot(index - p.index, price - p.price) < 5)) return t;
         } else if (t.type === 'callout' || t.type === 'text') {
-          return Math.hypot(data.index - d.index, data.price - d.price) < 5;
+          if (Math.hypot(index - d.index, price - d.price) < 5) return t;
         } else if (t.type === 'circle') {
-          const dx = data.index - d.centerIndex;
-          const dy = data.price - d.centerPrice;
+          const dx = index - d.centerIndex;
+          const dy = price - d.centerPrice;
           const rx = Math.abs(d.radiusIndex - d.centerIndex);
           const ry = Math.abs(d.radiusPrice - d.centerPrice);
-          return Math.abs((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) - 1) < 0.1;
+          if (Math.abs((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) - 1) < 0.1) return t;
         } else if (t.type === 'parallelChannel') {
           const dx = d.line1EndIndex - d.line1StartIndex;
           const dy = d.line1EndPrice - d.line1StartPrice;
-          const t1 = ((data.index - d.line1StartIndex) * dx + (data.price - d.line1StartPrice) * dy) / (dx * dx + dy * dy);
-          const t2 = ((data.index - d.line1StartIndex) * dx + (data.price - (d.line1StartPrice + d.line2OffsetPrice)) * dy) / (dx * dx + dy * dy);
-          const dist1 = Math.hypot(data.index - (d.line1StartIndex + t1 * dx), data.price - (d.line1StartPrice + t1 * dy));
-          const dist2 = Math.hypot(data.index - (d.line1StartIndex + t2 * dx), data.price - (d.line1StartPrice + d.line2OffsetPrice + t2 * dy));
-          return dist1 < 5 || dist2 < 5;
+          const t1 = ((index - d.line1StartIndex) * dx + (price - d.line1StartPrice) * dy) / (dx * dx + dy * dy);
+          const t2 = ((index - d.line1StartIndex) * dx + (price - (d.line1StartPrice + d.line2OffsetPrice)) * dy) / (dx * dx + dy * dy);
+          const dist1 = Math.hypot(index - (d.line1StartIndex + t1 * dx), price - (d.line1StartPrice + t1 * dy));
+          const dist2 = Math.hypot(index - (d.line1StartIndex + t2 * dx), price - (d.line1StartPrice + d.line2OffsetPrice + t2 * dy));
+          if (dist1 < 5 || dist2 < 5) return t;
         }
-        return false;
       } catch (error) {
-        console.error(`Error checking hit for tool ${t.type}:`, error);
-        return false;
+        console.error(`Error checking hit for tool ${t.type}: ${error}`);
       }
-    });
+    }
+    return null;
+  }
 
-    this.tools = this.tools.map(t => ({
-      ...t,
-      data: { ...t.data, selected: t.id === hitTool?.id },
-    }));
-    this.selectedToolId = hitTool?.id || null;
+  private getEditingPoint(tool: DrawingTool, index: number, price: number): number | null {
+    const d = tool.data as any;
+    if (['trendline', 'arrow', 'extendedLine', 'ray', 'rectangle', 'priceRange'].includes(tool.type)) {
+      if (Math.hypot(index - d.startIndex, price - d.startPrice) < 5) return 0;
+      if (Math.hypot(index - d.endIndex, price - d.endPrice) < 5) return 1;
+    } else if (tool.type === 'fibonacci') {
+      if (Math.hypot(index - d.startIndex, price - d.startPrice) < 5) return 0;
+      if (Math.hypot(index - d.endIndex, price - d.endPrice) < 5) return 1;
+    } else if (tool.type === 'circle') {
+      if (Math.hypot(index - d.centerIndex, price - d.centerPrice) < 5) return 0;
+      if (Math.hypot(index - d.radiusIndex, price - d.radiusPrice) < 5) return 1;
+    } else if (tool.type === 'callout') {
+      if (Math.hypot(index - d.index, price - d.price) < 5) return 0;
+      if (Math.hypot(index - d.targetIndex, price - d.targetPrice) < 5) return 1;
+    }
+    return null;
+  }
+
+  private editToolProperties(id: string): void {
+    const tool = this.tools.find(t => t.id === id);
+    if (!tool) return;
+    // Placeholder for UI-based property editor
+    console.log(`Editing properties for tool ${id}:`, tool.data);
+    // Example: Update text
+    if (tool.data.text) {
+      const newText = prompt('Enter new label:', tool.data.text.value);
+      if (newText) {
+        this.updateSelectedTool({ text: { ...tool.data.text, value: newText } });
+      }
+    }
+  }
+
+  private toggleLockTool(id: string): void {
+    this.tools = this.tools.map(t => {
+      if (t.id === id) {
+        return { ...t, data: { ...t.data, locked: !t.data.locked, selected: false } };
+      }
+      return t;
+    });
+    if (this.selectedToolId === id && this.tools.find(t => t.id === id)?.data.locked) {
+      this.selectedToolId = null;
+    }
+    this.saveState();
+  }
+
+  private saveState(): void {
+    this.undoStack.push([...this.tools]);
+    this.redoStack = [];
     this.setTools([...this.tools]);
+    if (this.undoStack.length > 50) this.undoStack.shift();
   }
 
   undo(): void {
-    if (this.undoStack.length === 0) return;
+    if (this.undoStack.length <= 1) return;
     const currentState = this.undoStack.pop()!;
     this.redoStack.push([...this.tools]);
     this.tools = currentState;
-    this.setTools([...this.tools]);
+    this.saveState();
+    this.widget?.requestRender();
   }
 
   redo(): void {
@@ -616,17 +788,17 @@ export class DrawingToolManager {
     const nextState = this.redoStack.pop()!;
     this.undoStack.push([...this.tools]);
     this.tools = nextState;
-    this.setTools([...this.tools]);
+    this.saveState();
+    this.widget?.requestRender();
   }
 
   deleteTool(id: string): void {
     this.tools = this.tools.filter(t => t.id !== id);
-    this.undoStack.push([...this.tools]);
-    this.redoStack = [];
-    this.setTools([...this.tools]);
+    this.saveState();
     if (this.selectedToolId === id) {
       this.selectedToolId = null;
     }
+    this.widget?.requestRender();
   }
 
   serializeTools(): string {
@@ -647,13 +819,31 @@ export class DrawingToolManager {
     try {
       const tools = JSON.parse(json) as DrawingTool[];
       tools.forEach(tool => validateToolData(tool.data));
-      this.tools = tools;
-      this.undoStack.push([...this.tools]);
-      this.redoStack = [];
-      this.setTools([...this.tools]);
+      this.tools = tools.map(t => ({
+        ...t,
+        data: { ...t.data, zIndex: t.data.zIndex ?? this.tools.length + 1, locked: t.data.locked ?? false }
+      }));
+      this.saveState();
+      this.widget?.requestRender();
     } catch (error) {
       console.error('Error deserializing tools:', error);
     }
+  }
+
+  renderWebGL(gl: WebGL2RenderingContext): void {
+    if (!this.gl) return;
+    // Placeholder for WebGL rendering
+    // Implement instanced rendering for tools
+    this.tools.forEach(tool => {
+      // Example: Render lines
+      if (['trendline', 'arrow'].includes(tool.type)) {
+        // Setup shaders, buffers, and draw
+      }
+    });
+  }
+
+  getHighlightedTool(): DrawingTool | null {
+    return this.highlightedToolId ? this.tools.find(t => t.id === this.highlightedToolId) || null : null;
   }
 
   destroy(): void {
@@ -665,12 +855,18 @@ export class DrawingToolManager {
       this.canvas.removeEventListener('touchmove', this.handleTouchMove);
       this.canvas.removeEventListener('touchend', this.handleTouchEnd);
       this.canvas.removeEventListener('contextmenu', this.handleContextMenu);
+      this.canvas.removeEventListener('wheel', this.handleWheel);
     }
+    this.kineticAnimation?.destroy();
     this.canvas = null;
     this.ctx = null;
+    this.gl = null;
+    this.widget = null;
+    this.crosshairManager = null;
     this.tools = [];
     this.setTools([]);
     this.undoStack = [];
     this.redoStack = [];
+    this.ticks = null;
   }
 }
