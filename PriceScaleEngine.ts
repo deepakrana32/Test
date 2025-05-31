@@ -1,125 +1,141 @@
-```typescript
-// PriceScaleEngine.ts
-// Computes price axis scaling for financial charts
+import { PriceScaleOptions, PriceScaleResult, PriceScaleTick } from './ChartTypes';
+import { debounce } from 'lodash';
 
-import { PriceScaleOptions, PriceScaleResult, PriceScaleTick } from '@/types/ChartTypes';
+export class PriceScaleEngine {
+  private prices: number[];
+  private options: PriceScaleOptions;
+  private minPrice: number;
+  private maxPrice: number;
+  private scaleFactor: number;
+  private listeners: (() => void)[];
 
-/**
- * Default price scale options.
- */
-const DEFAULT_OPTS: PriceScaleOptions = {
-  height: 600,
-  minRangeMargin: 0.1,
-  pixelPerTick: 50,
-  minTicks: 2,
-  maxTicks: 10,
-};
-
-/**
- * Rounds tick step to a nice number (e.g., 0.1, 0.5, 1, 5).
- * @param range Approximate tick step.
- * @returns Rounded tick step.
- */
-function roundTickStep(range: number): number {
-  if (range <= 0) return 1;
-  const magnitude = Math.pow(10, Math.floor(Math.log10(range)));
-  const normalized = range / magnitude;
-  if (normalized <= 1.5) return magnitude;
-  if (normalized <= 3) return 2 * magnitude;
-  if (normalized <= 7) return 5 * magnitude;
-  return 10 * magnitude;
-}
-
-/**
- * Formats a price value as a string.
- * @param value Price value.
- * @returns Formatted label.
- */
-function formatTickLabel(value: number): string {
-  if (Math.abs(value) < 0.01) return value.toFixed(4);
-  if (Math.abs(value) < 1) return value.toFixed(3);
-  if (Math.abs(value) < 100) return value.toFixed(2);
-  return value.toFixed(0);
-}
-
-/**
- * Computes price axis scaling based on visible prices.
- * @param visiblePrices Array of visible price values.
- * @param opts Price scale options.
- * @returns Price scale result with ticks and scaling functions.
- */
-export function computePriceScale(
-  visiblePrices: number[],
-  opts: Partial<PriceScaleOptions> = {}
-): PriceScaleResult {
-  const config: PriceScaleOptions = { ...DEFAULT_OPTS, ...opts };
-
-  // Validate inputs
-  if (!Array.isArray(visiblePrices) || !Number.isFinite(config.height) || config.height <= 0) {
-    return {
-      min: 0,
-      max: 1,
-      ticks: [],
-      scaleY: () => 0,
-      unscaleY: () => 0,
+  constructor(options: Partial<PriceScaleOptions> = {}) {
+    this.prices = [];
+    this.options = {
+      height: 400,
+      minRangeMargin: 0.1,
+      pixelPerTick: 50,
+      minTicks: 5,
+      maxTicks: 10,
+      inverted: false,
+      logarithmic: false,
+      locale: 'en-US',
+      optimalWidth: 80,
+      ...options,
     };
+    this.minPrice = 0;
+    this.maxPrice = 0;
+    this.scaleFactor = 1;
+    this.listeners = [];
+    this.setupZoomHandler();
   }
 
-  if (visiblePrices.length === 0 || !visiblePrices.every(Number.isFinite)) {
-    return {
-      min: 0,
-      max: 1,
-      ticks: [],
-      scaleY: () => 0,
-      unscaleY: () => 0,
-    };
+  private setupZoomHandler() {
+    this.zoomAt = debounce(this.zoomAt.bind(this), 16); // ~60 FPS
   }
 
-  let rawMin = Math.min(...visiblePrices);
-  let rawMax = Math.max(...visiblePrices);
-
-  // Handle equal min/max
-  if (rawMax === rawMin) {
-    const offset = Math.max(rawMax * 0.001, 0.01);
-    rawMax += offset;
-    rawMin -= offset;
+  setData(prices: number[]) {
+    this.prices = prices.filter(p => Number.isFinite(p));
+    if (this.prices.length === 0) return;
+    this.minPrice = Math.min(...this.prices);
+    this.maxPrice = Math.max(...this.prices);
+    this.notifyListeners();
   }
 
-  // Add padding
-  const range = rawMax - rawMin;
-  const margin = range * config.minRangeMargin;
-  let min = rawMin - margin;
-  let max = rawMax + margin;
+  setOptions(options: Partial<PriceScaleOptions>) {
+    this.options = { ...this.options, ...options };
+    this.notifyListeners();
+  }
 
-  // Clamp minimum to zero
-  min = Math.max(min, 0);
+  zoomAt(y: number, delta: number) {
+    this.scaleFactor *= delta;
+    this.scaleFactor = Math.max(0.1, Math.min(10, this.scaleFactor));
+    const price = this.unscaleY(y);
+    const range = this.maxPrice - this.minPrice;
+    const newRange = range / delta;
+    this.minPrice = price - (y / this.options.height) * newRange;
+    this.maxPrice = this.minPrice + newRange;
+    this.notifyListeners();
+  }
 
-  // Compute ticks
-  const totalPixels = config.height;
-  const desiredTicks = Math.floor(totalPixels / config.pixelPerTick);
-  const clampedTicks = Math.max(config.minTicks, Math.min(config.maxTicks, desiredTicks));
-  const step = roundTickStep((max - min) / clampedTicks);
+  computePriceScale(): PriceScaleResult | null {
+    if (this.prices.length === 0) return null;
 
-  const ticks: PriceScaleTick[] = [];
-  const firstTick = Math.floor(min / step) * step;
+    const range = this.maxPrice - this.minPrice;
+    if (range <= 0) return null;
 
-  for (let val = firstTick; val <= max; val += step) {
-    const y = totalPixels - ((val - min) / (max - min)) * totalPixels;
-    if (y >= 0 && y <= totalPixels) {
-      ticks.push({
-        value: val,
-        y,
-        label: config.formatLabel ? config.formatLabel(val) : formatTickLabel(val),
-      });
+    const margin = range * this.options.minRangeMargin;
+    let min = this.minPrice - margin;
+    let max = this.maxPrice + margin;
+
+    if (this.options.logarithmic) {
+      min = Math.log10(Math.max(1e-10, min));
+      max = Math.log10(Math.max(1e-10, max));
     }
+
+    const tickSpacing = this.calculateTickSpacing(max - min);
+    const ticks: PriceScaleTick[] = [];
+    let currentTick = Math.floor(min / tickSpacing) * tickSpacing;
+
+    while (currentTick <= max) {
+      let price = this.options.logarithmic ? Math.pow(10, currentTick) : currentTick;
+      const y = this.scaleY(price);
+      if (y >= 0 && y <= this.options.height) {
+        ticks.push({
+          price,
+          y,
+          label: price.toLocaleString(this.options.locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        });
+      }
+      currentTick += tickSpacing;
+    }
+
+    return {
+      minPrice: min,
+      maxPrice: max,
+      ticks,
+      scaleY: (price: number) => {
+        if (this.options.logarithmic) price = Math.log10(Math.max(1e-10, price));
+        const normalized = (price - min) / (max - min);
+        return this.options.inverted
+          ? normalized * this.options.height
+          : (1 - normalized) * this.options.height;
+      },
+      unscaleY: (y: number) => {
+        const normalized = this.options.inverted
+          ? y / this.options.height
+          : 1 - y / this.options.height;
+        let price = normalized * (max - min) + min;
+        return this.options.logarithmic ? Math.pow(10, price) : price;
+      },
+    };
   }
 
-  return {
-    min,
-    max,
-    ticks,
-    scaleY: (price: number) => totalPixels - ((price - min) / (max - min)) * totalPixels,
-    unscaleY: (y: number) => ((totalPixels - y) / totalPixels) * (max - min) + min,
-  };
+  private calculateTickSpacing(range: number): number {
+    const idealTickCount = Math.max(
+      this.options.minTicks,
+      Math.min(this.options.maxTicks, Math.floor(this.options.height / this.options.pixelPerTick))
+    );
+    const rawSpacing = range / idealTickCount;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawSpacing)));
+    const normalized = rawSpacing / magnitude;
+    const steps = [1, 2, 5, 10];
+    const closestStep = steps.reduce((prev, curr) =>
+      Math.abs(curr - normalized) < Math.abs(prev - normalized) ? curr : prev
+    );
+    return closestStep * magnitude;
+  }
+
+  onChange(callback: () => void) {
+    this.listeners.push(callback);
+  }
+
+  private notifyListeners() {
+    this.listeners.forEach(cb => cb());
+  }
+
+  destroy() {
+    this.prices = [];
+    this.listeners = [];
+  }
 }
-```
