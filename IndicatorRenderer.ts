@@ -1,107 +1,73 @@
-import { ChartPlugins } from './ChartPlugins';
-import { StyleManager } from './StyleManager';
-import { drawLine } from './canvas-utils';
+import { PriceScaleEngine } from './PriceScaleEngine';
+import { TimeScaleEngine } from './TimeScaleEngine';
 
-interface IndicatorData {
+interface Indicator {
   id: string;
-  values: Float32Array;
-  color: string;
+  type: string;
+  params?: any;
+  data?: number[];
 }
 
 export class IndicatorRenderer {
-  private plugins: ChartPlugins;
-  private styleManager: StyleManager;
-  private gl: WebGL2RenderingContext | null;
-  private indicators: IndicatorData[];
+  private indicators: Indicator[];
+  private priceScale: PriceScaleEngine;
+  private timeScale: TimeScaleEngine;
 
-  constructor(plugins: ChartPlugins, styleManager: StyleManager, canvas: HTMLCanvasElement) {
-    if (!plugins || !styleManager || !canvas) throw new Error('Missing dependencies');
-    this.plugins = plugins;
-    this.styleManager = styleManager;
-    this.gl = canvas.getContext('webgl2');
+  constructor(priceScale: PriceScaleEngine, timeScale: TimeScaleEngine) {
     this.indicators = [];
-    if (this.gl) this.setupWebGL();
+    this.priceScale = priceScale;
+    this.timeScale = timeScale;
   }
 
-  private setupWebGL() {
-    if (!this.gl) return;
-    const vsSource = `
-      attribute vec2 a_position;
-      void main() {
-        gl_Position = vec4(a_position, 0, 1);
-      }
-    `;
-    const fsSource = `
-      precision mediump float;
-      uniform vec4 u_color;
-      void main() {
-        gl_FragColor = u_color;
-      }
-    `;
-    const program = this.gl.createProgram()!;
-    const vs = this.gl.createShader(this.gl.VERTEX_SHADER)!;
-    const fs = this.gl.createShader(this.gl.FRAGMENT_SHADER)!;
-    this.gl.shaderSource(vs, vsSource);
-    this.gl.shaderSource(fs, fsSource);
-    this.gl.compileShader(vs);
-    this.gl.compileShader(fs);
-    this.gl.attachShader(program, vs);
-    this.gl.attachShader(program, fs);
-    this.gl.linkProgram(program);
-    this.gl.useProgram(program);
+  addIndicator(id: string, type: string, params?: any) {
+    this.indicators.push({ id, type, params });
   }
 
-  setIndicators(indicators: IndicatorData[]) {
-    this.indicators = indicators.filter(i => i.values.length > 0);
+  removeIndicator(id: string) {
+    this.indicators = this.indicators.filter(i => i.id !== id);
   }
 
-  render2D(ctx: CanvasRenderingContext2D, width: number, height: number, scaleX: (index: number) => number, scaleY: (price: number) => number) {
-    this.indicators.forEach(indicator => {
-      for (let i = 1; i < indicator.values.length; i++) {
-        const x1 = scaleX(i - 1);
-        const y1 = scaleY(indicator.values[i - 1]);
-        const x2 = scaleX(i);
-        const y2 = scaleY(indicator.values[i]);
-        drawLine(ctx, x1, y1, x2, y2, indicator.color, 1, false);
+  computeIndicators(indicators: Indicator[], closes: Float32Array, highs: Float32Array, lows: Float32Array) {
+    indicators.forEach(indicator => {
+      if (indicator.type === 'SMA') {
+        const period = indicator.params?.period || 14;
+        const data = new Array(closes.length).fill(0);
+        for (let i = period - 1; i < closes.length; i++) {
+          const sum = Array.from(closes.slice(i - period + 1, i + 1)).reduce((a, b) => a + b, 0);
+          data[i] = sum / period;
+        }
+        indicator.data = data;
       }
+      // Add more indicators (e.g., RSI, MACD)
     });
   }
 
-  renderWebGL(scaleX: (index: number) => number, scaleY: (price: number) => number) {
-    if (!this.gl) return;
-    this.gl.clearColor(0, 0, 0, 0);
-    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+  render2D(ctx: CanvasRenderingContext2D) {
+    ctx.save();
+    const scaleX = this.timeScale.computeTimeScale().scaleX;
+    const scaleY = this.priceScale.computePriceScale().scaleY;
 
     this.indicators.forEach(indicator => {
-      const vertices = new Float32Array(indicator.values.length * 4);
-      for (let i = 0; i < indicator.values.length; i++) {
-        vertices[i * 4] = scaleX(i) / this.gl.canvas.width * 2 - 1;
-        vertices[i * 4 + 1] = scaleY(indicator.values[i]) / this.gl.canvas.height * 2 - 1;
-        vertices[i * 4 + 2] = scaleX(i + 1) / this.gl.canvas.width * 2 - 1;
-        vertices[i * 4 + 3] = scaleY(indicator.values[i + 1] || indicator.values[i]) / this.gl.canvas.height * 2 - 1;
+      if (indicator.data) {
+        ctx.beginPath();
+        ctx.strokeStyle = 'blue'; // Theme via StyleManager later
+        ctx.lineWidth = 1;
+        indicator.data.forEach((value, i) => {
+          if (value) {
+            const x = scaleX(i);
+            const y = scaleY(value);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+        });
+        ctx.stroke();
       }
-
-      const buffer = this.gl.createBuffer();
-      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer);
-      this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.STATIC_DRAW);
-
-      const position = this.gl.getAttribLocation(this.gl.getParameter(this.gl.CURRENT_PROGRAM), 'a_position');
-      this.gl.enableVertexAttribArray(position);
-      this.gl.vertexAttribPointer(position, 2, this.gl.FLOAT, false, 0, 0);
-
-      const color = this.gl.getUniformLocation(this.gl.getParameter(this.gl.CURRENT_PROGRAM), 'u_color');
-      const theme = this.styleManager.getTheme();
-      this.gl.uniform4f(color, parseInt(theme.crosshairColor.slice(1, 3), 16) / 255, parseInt(theme.crosshairColor.slice(3, 5), 16) / 255, parseInt(theme.crosshairColor.slice(5, 7), 16) / 255, 1);
-
-      this.gl.drawArrays(this.gl.LINES, 0, vertices.length / 2);
     });
+
+    ctx.restore();
   }
 
   destroy() {
     this.indicators = [];
-    if (this.gl) {
-      this.gl.getExtension('WEBGL_lose_context')?.loseContext();
-      this.gl = null;
-    }
   }
 }
