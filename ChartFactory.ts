@@ -3,7 +3,7 @@ import { PriceScaleEngine } from './PriceScaleEngine';
 import { TimeScaleEngine } from './TimeScaleEngine';
 import { CrosshairManager } from './CrosshairManager';
 import { DataManager } from './DataManager';
-import { AnimationManager } from './AnimationManager';
+import { KineticAnimation } from './KineticAnimation';
 import { TooltipManager } from './TooltipManager';
 import { StyleManager } from './StyleManager';
 import { ChartState } from './ChartState';
@@ -22,7 +22,7 @@ import { ChartHistory } from './ChartHistory';
 import { InteractionManager } from './InteractionManager';
 import { ThemeEditor } from './ThemeEditor';
 import { AnalyticsTracker } from './AnalyticsTracker';
-import { ChartPlugins } from './ChartPlugins';
+import { DrawingToolManager } from './DrawingToolManager';
 import { PatternRenderer } from './PatternRenderer';
 
 interface ChartConfig {
@@ -51,13 +51,16 @@ export class ChartFactory {
 
     if (!container) throw new Error('Container element required');
 
-    // Initialize core components
+    // Initialize canvas
     const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = width * devicePixelRatio;
+    canvas.height = height * devicePixelRatio;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
     canvas.setAttribute('aria-label', 'Financial chart');
     container.appendChild(canvas);
 
+    // Initialize core components
     const styleManager = new StyleManager();
     styleManager.setTheme(theme);
 
@@ -72,24 +75,47 @@ export class ChartFactory {
     const priceScaleEngine = new PriceScaleEngine({ height, locale });
     const timeScaleEngine = new TimeScaleEngine({ locale, timezone });
     const crosshairManager = new CrosshairManager(priceScaleEngine, timeScaleEngine, styleManager.getCrosshairParams());
-    const animationManager = new AnimationManager(timeScaleEngine, priceScaleEngine);
+    
+    // Initialize kinetic animation
+    const kineticAnimation = new KineticAnimation((dx: number) => {
+      widget.handleScroll(dx / timeScaleEngine.computeTimeScale().scaleX(1));
+    });
+
     const tooltipManager = new TooltipManager(priceScaleEngine, timeScaleEngine, styleManager.getTooltipOptions());
-    const gestureManager = new GestureManager(canvas, timeScaleEngine, priceScaleEngine, animationManager);
+    const gestureManager = new GestureManager(canvas, timeScaleEngine, priceScaleEngine, kineticAnimation);
     const interactionManager = new InteractionManager(
       { canvas } as ChartWidget,
       crosshairManager,
       timeScaleEngine,
       priceScaleEngine,
-      animationManager,
+      kineticAnimation,
       styleManager
     );
 
-    const chartPlugins = new ChartPlugins();
-    const indicatorRenderer = new IndicatorRenderer(chartPlugins, styleManager, canvas);
+    // Initialize drawing tool manager
+    const drawingToolManager = new DrawingToolManager(
+      canvas,
+      canvas.getContext('2d')!,
+      canvas.getContext('webgl2'),
+      { canvas } as ChartWidget,
+      crosshairManager,
+      (tools) => widget['tools'] = tools,
+      timeScaleEngine.computeTimeScale().scaleX,
+      priceScaleEngine.computePriceScale().scaleY,
+      timeScaleEngine.computeTimeScale().unscaleX,
+      priceScaleEngine.computePriceScale().unscaleY,
+      timeScaleEngine.timeToIndex,
+      errorHandler,
+      localizationManager,
+      styleManager,
+      kineticAnimation
+    );
+
+    const indicatorRenderer = new IndicatorRenderer(drawingToolManager, styleManager, canvas);
     const patternRenderer = new PatternRenderer();
     const patternManager = new PatternManager(patternRenderer);
     const indicatorConfig = new IndicatorConfig({ addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as IndicatorManager, styleManager);
-    const pluginManager = new PluginManager(chartPlugins, errorHandler);
+    const pluginManager = new PluginManager(drawingToolManager, errorHandler);
 
     const chartState = new ChartState(timeScaleEngine, priceScaleEngine, { addIndicator: () => {}, removeIndicator: () => {}, activeIndicators: [] } as IndicatorManager);
     const exportManager = new ExportManager({ canvas } as ChartWidget, styleManager);
@@ -117,6 +143,14 @@ export class ChartFactory {
     // Apply accessibility
     container.setAttribute('role', 'region');
     container.setAttribute('aria-label', `Chart container initialized at ${localizationManager.formatTime(Date.now())}`);
+
+    // Assign managers to widget for access
+    widget['crosshairManager'] = crosshairManager;
+    widget['drawingToolManager'] = drawingToolManager;
+    widget['indicatorRenderer'] = indicatorRenderer;
+    widget['tooltipManager'] = tooltipManager;
+    widget['gestureManager'] = gestureManager;
+    widget['interactionManager'] = interactionManager;
 
     return widget;
   }
