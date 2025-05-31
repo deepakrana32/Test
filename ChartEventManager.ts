@@ -1,340 +1,186 @@
-// ChartEventManager.ts
+import { CrosshairEvent, ChartEventType } from './ChartTypes';
+import { debounce } from 'lodash';
 
-// Interface for event configuration options
-interface ChartEventConfig {
-  /** Whether event listeners are passive (default: false for touch, true for others) */
-  passive?: boolean;
-  /** Whether to use capture phase for event listeners (default: false) */
-  capture?: boolean;
+interface EventData {
+  x?: number;
+  y?: number;
+  dx?: number;
+  delta?: number;
 }
 
-// Interface for zoom event data
-interface ZoomEvent {
-  /** Zoom delta (positive for zoom in, negative for zoom out) */
-  delta: number;
-  /** X-coordinate in canvas space */
-  x: number;
-}
-
-// Interface for pan event data
-interface PanEvent {
-  /** X-axis panning distance */
-  dx: number;
-}
-
-// Interface for click event data
-interface ClickEvent {
-  /** X-coordinate in canvas space */
-  x: number;
-  /** Y-coordinate in canvas space */
-  y: number;
-}
-
-// Interface for hover event data
-interface HoverEvent {
-  /** X-coordinate in canvas space */
-  x: number;
-  /** Y-coordinate in canvas space */
-  y: number;
-}
-
-// Interface for right-click event data
-interface RightClickEvent {
-  /** X-coordinate in canvas space */
-  x: number;
-  /** Y-coordinate in canvas space */
-  y: number;
-}
-
-// Union type for all possible event data
-type ChartEventData = ZoomEvent | PanEvent | ClickEvent | HoverEvent | RightClickEvent;
-
-// Type for event handlers
-type ChartEventHandler = (data: ChartEventData) => void;
-
-// Supported event types
-type ChartEventType = 'zoom' | 'pan' | 'click' | 'hover' | 'rightclick';
-
-/**
- * Manages user input events (mouse, touch, wheel, keyboard) for a chart canvas.
- * Emits custom events (e.g., zoom, pan, click, hover, rightclick) to registered handlers.
- */
 export class ChartEventManager {
-  private readonly canvas: HTMLCanvasElement;
-  private readonly config: ChartEventConfig;
-  private listeners: { [key in ChartEventType]?: ChartEventHandler[] } = {};
-  private isAttached: boolean = false;
-  private isDragging: boolean = false;
-  private lastX: number = 0;
-  private lastTouchTime: number = 0;
-  private isChartMode: boolean = true;
-  private readonly handlers: {
-    wheel: (e: WheelEvent) => void;
-    mouseDown: (e: MouseEvent) => void;
-    mouseMove: (e: MouseEvent) => void;
-    mouseUp: (e: MouseEvent) => void;
-    click: (e: MouseEvent) => void;
-    contextMenu: (e: MouseEvent) => void;
-    touchStart: (e: TouchEvent) => void;
-    touchMove: (e: TouchEvent) => void;
-    touchEnd: (e: TouchEvent) => void;
-    keydown: (e: KeyboardEvent) => void;
-  };
+  private canvas: HTMLCanvasElement;
+  private listeners: Map<ChartEventType, ((data: any) => void)[]>;
+  private linkedManagers: ChartEventManager[];
+  private lastTouchTime: number;
+  private lastTouchX: number | null;
+  private touchCount: number;
 
-  /**
-   * Creates a new ChartEventManager instance.
-   * @param canvas The HTML canvas element to attach events to.
-   * @param config Optional event configuration.
-   * @throws Error if canvas is invalid.
-   */
-  constructor(canvas: HTMLCanvasElement, config: ChartEventConfig = {}) {
-    if (!(canvas instanceof HTMLCanvasElement)) {
-      throw new Error('Invalid canvas: must be an HTMLCanvasElement');
-    }
-
+  constructor(canvas: HTMLCanvasElement) {
+    if (!canvas) throw new Error('Canvas is required');
     this.canvas = canvas;
-    this.config = {
-      passive: config.passive,
-      capture: config.capture ?? false,
-    };
-
-    this.handlers = {
-      wheel: this.onWheel.bind(this),
-      mouseDown: this.onMouseDown.bind(this),
-      mouseMove: this.onMouseMove.bind(this),
-      mouseUp: this.onMouseUp.bind(this),
-      click: this.onClick.bind(this),
-      contextMenu: this.onContextMenu.bind(this),
-      touchStart: this.onTouchStart.bind(this),
-      touchMove: this.onTouchMove.bind(this),
-      touchEnd: this.onTouchEnd.bind(this),
-      keydown: this.onKeydown.bind(this),
-    };
-
-    this.attach();
-  }
-
-  /**
-   * Attaches event listeners to the canvas.
-   */
-  private attach(): void {
-    if (this.isAttached) {
-      console.warn('ChartEventManager already attached');
-      return;
-    }
-
-    const { passive, capture } = this.config;
-    this.canvas.addEventListener('wheel', this.handlers.wheel, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('mousedown', this.handlers.mouseDown, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('mousemove', this.handlers.mouseMove, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('mouseup', this.handlers.mouseUp, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('click', this.handlers.click, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('contextmenu', this.handlers.contextMenu, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('touchstart', this.handlers.touchStart, { passive: passive ?? false, capture });
-    this.canvas.addEventListener('touchmove', this.handlers.touchMove, { passive: passive ?? false, capture });
-    this.canvas.addEventListener('touchend', this.handlers.touchEnd, { passive: passive ?? true, capture });
-    this.canvas.addEventListener('keydown', this.handlers.keydown, { passive: passive ?? true, capture });
-
-    this.isAttached = true;
-  }
-
-  /**
-   * Sets chart or draw mode to control event emission.
-   * @param isChartMode True for chart mode, false for draw mode.
-   */
-  public setChartMode(isChartMode: boolean): void {
-    this.isChartMode = isChartMode;
-  }
-
-  /**
-   * Registers a handler for a specific event type.
-   * @param event The event type (e.g., 'zoom', 'pan', 'click', 'hover', 'rightclick').
-   * @param handler The handler function to call when the event is emitted.
-   * @throws Error if event or handler is invalid.
-   */
-  public on(event: ChartEventType, handler: ChartEventHandler): void {
-    if (!['zoom', 'pan', 'click', 'hover', 'rightclick'].includes(event)) {
-      throw new Error(`Invalid event type: ${event}`);
-    }
-    if (typeof handler !== 'function') {
-      throw new Error('Invalid handler: must be a function');
-    }
-
-    if (!this.listeners[event]) {
-      this.listeners[event] = [];
-    }
-    this.listeners[event]!.push(handler);
-  }
-
-  /**
-   * Removes a specific handler for an event type.
-   * @param event The event type.
-   * @param handler The handler to remove.
-   */
-  public removeListener(event: ChartEventType, handler: ChartEventHandler): void {
-    if (this.listeners[event]) {
-      this.listeners[event] = this.listeners[event]!.filter(h => h !== handler);
-      if (this.listeners[event]!.length === 0) {
-        delete this.listeners[event];
-      }
-    }
-  }
-
-  /**
-   * Emits an event to all registered handlers, respecting chart mode.
-   * @param event The event type.
-   * @param data The event data.
-   */
-  public emit(event: ChartEventType, data: ChartEventData): void {
-    if ((event === 'click' || event === 'hover' || event === 'rightclick') && this.isChartMode) {
-      return; // Skip tool events in chart mode
-    }
-    if ((event === 'zoom' || event === 'pan') && !this.isChartMode) {
-      return; // Skip chart events in draw mode
-    }
-    if (this.listeners[event]) {
-      this.listeners[event]!.forEach(handler => {
-        try {
-          handler(data);
-        } catch (error) {
-          console.error(`Handler for ${event} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-      });
-    }
-  }
-
-  /**
-   * Detaches all event listeners and clears state.
-   */
-  public detach(): void {
-    if (!this.isAttached) {
-      return;
-    }
-
-    const { passive, capture } = this.config;
-    this.canvas.removeEventListener('wheel', this.handlers.wheel, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('mousedown', this.handlers.mouseDown, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('mousemove', this.handlers.mouseMove, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('mouseup', this.handlers.mouseUp, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('click', this.handlers.click, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('contextmenu', this.handlers.contextMenu, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('touchstart', this.handlers.touchStart, { passive: passive ?? false, capture });
-    this.canvas.removeEventListener('touchmove', this.handlers.touchMove, { passive: passive ?? false, capture });
-    this.canvas.removeEventListener('touchend', this.handlers.touchEnd, { passive: passive ?? true, capture });
-    this.canvas.removeEventListener('keydown', this.handlers.keydown, { passive: passive ?? true, capture });
-
-    this.listeners = {};
-    this.isDragging = false;
-    this.lastX = 0;
+    this.listeners = new Map();
+    this.linkedManagers = [];
     this.lastTouchTime = 0;
-    this.isAttached = false;
+    this.lastTouchX = null;
+    this.touchCount = 0;
+    this.setupEventListeners();
   }
 
-  /**
-   * Converts screen coordinates to canvas coordinates.
-   * @param x Screen X coordinate.
-   * @param y Screen Y coordinate.
-   * @returns Canvas coordinates [x, y].
-   */
-  private getCanvasCoordinates(x: number, y: number): [number, number] {
+  private setupEventListeners() {
+    this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
+    this.canvas.addEventListener('mousemove', debounce(this.handleMouseMove.bind(this), 5));
+    this.canvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
+    this.canvas.addEventListener('wheel', this.handleWheel.bind(this));
+    this.canvas.addEventListener('touchstart', this.handleTouchStart.bind(this));
+    this.canvas.addEventListener('touchmove', debounce(this.handleTouchMove.bind(this), 5));
+    this.canvas.addEventListener('touchend', this.handleTouchEnd.bind(this));
+    this.canvas.addEventListener('dblclick', this.handleDoubleClick.bind(this));
+    this.canvas.addEventListener('mouseenter', this.handleMouseEnter.bind(this));
+    this.canvas.addEventListener('mouseleave', this.handleMouseLeave.bind(this));
+    this.canvas.addEventListener('keydown', this.handleKeyDown.bind(this));
+  }
+
+  on(type: ChartEventType, callback: (data: any) => void) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, []);
+    }
+    this.listeners.get(type)!.push(callback);
+  }
+
+  dispatchEvent(type: ChartEventType, data: any) {
+    this.listeners.get(type)?.forEach(callback => callback(data));
+    this.linkedManagers.forEach(manager => {
+      if (['pan', 'zoom'].includes(type)) {
+        manager.dispatchEvent(type, data);
+      }
+    });
+  }
+
+  link(manager: ChartEventManager) {
+    if (!this.linkedManagers.includes(manager)) {
+      this.linkedManagers.push(manager);
+      manager.link(this); // Bidirectional sync
+    }
+  }
+
+  private getCoordinates(event: MouseEvent | TouchEvent): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    return [(x - rect.left) * (this.canvas.width / rect.width), (y - rect.top) * (this.canvas.height / rect.height)];
+    const clientX = 'touches' in event ? event.touches[0]?.clientX || 0 : event.clientX;
+    const clientY = 'touches' in event ? event.touches[0]?.clientY || 0 : event.clientY;
+    return {
+      x: Math.max(0, Math.min(this.canvas.width, (clientX - rect.left) * devicePixelRatio)),
+      y: Math.max(0, Math.min(this.canvas.height, (clientY - rect.top) * devicePixelRatio)),
+    };
   }
 
-  private onWheel(event: WheelEvent): void {
-    if (!event.deltaY) return;
-
+  private handleMouseDown(event: MouseEvent) {
     event.preventDefault();
-    const [x] = this.getCanvasCoordinates(event.clientX, event.clientY);
-    const zoomDelta = -event.deltaY * 0.001;
-    if (Math.abs(zoomDelta) > 0.0001) {
-      this.emit('zoom', { delta: zoomDelta, x });
-    }
+    const { x, y } = this.getCoordinates(event);
+    this.dispatchEvent('mousedown', { x, y });
   }
 
-  private onMouseDown(event: MouseEvent): void {
-    this.isDragging = true;
-    this.lastX = event.clientX;
+  private handleMouseMove(event: MouseEvent) {
+    const { x, y } = this.getCoordinates(event);
+    this.dispatchEvent('mousemove', { x, y });
+    this.dispatchEvent('crosshair', { x, y, price: 0, time: 0, index: 0 } as CrosshairEvent);
   }
 
-  private onMouseMove(event: MouseEvent): void {
-    const [x, y] = this.getCanvasCoordinates(event.clientX, event.clientY);
-    this.emit('hover', { x, y });
-
-    if (!this.isDragging) return;
-
-    const delta = event.clientX - this.lastX;
-    if (Math.abs(delta) > 0) {
-      this.emit('pan', { dx: delta });
-      this.lastX = event.clientX;
-    }
-  }
-
-  private onMouseUp(_event: MouseEvent): void {
-    this.isDragging = false;
-  }
-
-  private onClick(event: MouseEvent): void {
-    const [x, y] = this.getCanvasCoordinates(event.clientX, event.clientY);
-    this.emit('click', { x, y });
-  }
-
-  private onContextMenu(event: MouseEvent): void {
+  private handleMouseUp(event: MouseEvent) {
     event.preventDefault();
-    const [x, y] = this.getCanvasCoordinates(event.clientX, event.clientY);
-    this.emit('rightclick', { x, y });
+    const { x, y } = this.getCoordinates(event);
+    this.dispatchEvent('mouseup', { x, y });
   }
 
-  private onTouchStart(event: TouchEvent): void {
-    if (event.touches.length === 2) {
-      event.preventDefault();
+  private handleWheel(event: WheelEvent) {
+    event.preventDefault();
+    const { x } = this.getCoordinates(event);
+    const delta = event.deltaY > 0 ? 0.9 : 1.1;
+    this.dispatchEvent('zoom', { x, delta });
+  }
+
+  private handleTouchStart(event: TouchEvent) {
+    event.preventDefault();
+    this.touchCount = event.touches.length;
+    const { x } = this.getCoordinates(event);
+    const currentTime = performance.now();
+
+    if (currentTime - this.lastTouchTime < 300 && this.touchCount === 1) {
+      this.dispatchEvent('doubleclick', { x });
     }
-    if (event.touches.length === 1) {
-      this.lastX = event.touches[0].clientX;
-      this.lastTouchTime = Date.now();
+    this.lastTouchTime = currentTime;
+    this.lastTouchX = x;
+
+    if (this.touchCount === 1) {
+      this.dispatchEvent('mousedown', { x });
+    } else if (this.touchCount === 2) {
+      this.dispatchEvent('pinchstart', { x });
     }
   }
 
-  private onTouchMove(event: TouchEvent): void {
-    const now = Date.now();
-    if (now - this.lastTouchTime < 16) return; // Debounce: ~60fps
-    this.lastTouchTime = now;
-
-    if (event.touches.length === 1) {
-      const touch = event.touches[0];
-      const [x, y] = this.getCanvasCoordinates(touch.clientX, touch.clientY);
-      this.emit('hover', { x, y });
-
-      const dx = touch.clientX - this.lastX;
-      if (Math.abs(dx) > 0) {
-        this.emit('pan', { dx: -dx });
-        this.lastX = touch.clientX;
-      }
-    } else if (event.touches.length === 2) {
-      event.preventDefault();
-      const dx = Math.abs(event.touches[1].clientX - event.touches[0].clientX);
-      const [x] = this.getCanvasCoordinates(
-        (event.touches[0].clientX + event.touches[1].clientX) / 2,
-        event.touches[0].clientY
+  private handleTouchMove(event: TouchEvent) {
+    event.preventDefault();
+    const { x } = this.getCoordinates(event);
+    if (this.touchCount === 1 && this.lastTouchX !== null) {
+      const dx = x - this.lastTouchX;
+      this.dispatchEvent('pan', { dx });
+      this.lastTouchX = x;
+    } else if (this.touchCount === 2 && event.touches.length === 2) {
+      const dist = Math.hypot(
+        event.touches[0].clientX - event.touches[1].clientX,
+        event.touches[0].clientY - event.touches[1].clientY
       );
-      this.emit('zoom', { delta: dx * 0.01, x });
+      this.dispatchEvent('pinch', { x, delta: dist });
+    }
+    this.dispatchEvent('crosshair', { x, price: 0, time: 0, index: 0 } as CrosshairEvent);
+  }
+
+  private handleTouchEnd(event: TouchEvent) {
+    event.preventDefault();
+    this.touchCount = event.touches.length;
+    if (this.touchCount === 0) {
+      this.lastTouchX = null;
+      this.dispatchEvent('mouseup', {});
     }
   }
 
-  private onTouchEnd(_event: TouchEvent): void {
-    this.lastX = 0;
-    this.lastTouchTime = 0;
+  private handleDoubleClick(event: MouseEvent) {
+    const { x } = this.getCoordinates(event);
+    this.dispatchEvent('doubleclick', { x });
   }
 
-  private onKeydown(event: KeyboardEvent): void {
-    if (event.key === 'ArrowLeft') {
-      this.emit('pan', { dx: 10 });
-    } else if (event.key === 'ArrowRight') {
-      this.emit('pan', { dx: -10 });
-    } else if (event.key === 'ArrowUp') {
-      this.emit('zoom', { delta: 0.1, x: this.canvas.width / 2 });
-    } else if (event.key === 'ArrowDown') {
-      this.emit('zoom', { delta: -0.1, x: this.canvas.width / 2 });
+  private handleMouseEnter(event: MouseEvent) {
+    this.dispatchEvent('mouseenter', {});
+  }
+
+  private handleMouseLeave(event: MouseEvent) {
+    this.dispatchEvent('mouseleave', {});
+    this.dispatchEvent('crosshair', { x: -1, y: -1, price: 0, time: 0, index: -1 } as CrosshairEvent);
+  }
+
+  private handleKeyDown(event: KeyboardEvent) {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      const dx = event.key === 'ArrowLeft' ? 10 : event.key === 'ArrowRight' ? -10 : 0;
+      const delta = event.key === 'ArrowUp' ? 1.1 : event.key === 'ArrowDown' ? 0.9 : 1;
+      if (dx !== 0) this.dispatchEvent('pan', { dx });
+      if (delta !== 1) this.dispatchEvent('zoom', { x: this.canvas.width / 2, delta });
     }
+  }
+
+  destroy() {
+    this.canvas.removeEventListener('mousedown', this.handleMouseDown);
+    this.canvas.removeEventListener('mousemove', this.handleMouseMove);
+    this.canvas.removeEventListener('mouseup', this.handleMouseUp);
+    this.canvas.removeEventListener('wheel', this.handleWheel);
+    this.canvas.removeEventListener('touchstart', this.handleTouchStart);
+    this.canvas.removeEventListener('touchmove', this.handleTouchMove);
+    this.canvas.removeEventListener('touchend', this.handleTouchEnd);
+    this.canvas.removeEventListener('dblclick', this.handleDoubleClick);
+    this.canvas.removeEventListener('mouseenter', this.handleMouseEnter);
+    this.canvas.removeEventListener('mouseleave', this.handleMouseLeave);
+    this.canvas.removeEventListener('keydown', this.handleKeyDown);
+    this.listeners.clear();
+    this.linkedManagers = [];
   }
 }
