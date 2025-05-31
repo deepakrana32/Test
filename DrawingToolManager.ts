@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { debounce, memoize } from 'lodash';
 import { CrosshairManager } from './CrosshairManager';
 import { ChartWidget } from './ChartWidget';
-import { AnimationManager } from './AnimationManager';
+import { KineticAnimation } from './KineticAnimation';
 import { ErrorHandler } from './ErrorHandler';
 import { LocalizationManager } from './LocalizationManager';
 import { StyleManager } from './StyleManager';
@@ -140,7 +140,7 @@ export class DrawingToolManager {
   private gl: WebGL2RenderingContext | null;
   private widget: ChartWidget | null;
   private crosshairManager: CrosshairManager | null;
-  private animationManager: AnimationManager | null;
+  private kineticAnimation: KineticAnimation | null;
   private errorHandler: ErrorHandler;
   private localizationManager: LocalizationManager;
   private styleManager: StyleManager;
@@ -154,9 +154,6 @@ export class DrawingToolManager {
   private ticks: Float32Array | null;
   private highlightedToolId: string | null;
   private liveRegion: HTMLElement;
-  private lastX: number | null = null;
-  private lastTime: number | null = null;
-  private velocity: number = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -173,9 +170,9 @@ export class DrawingToolManager {
     errorHandler: ErrorHandler,
     localizationManager: LocalizationManager,
     styleManager: StyleManager,
-    animationManager: AnimationManager
+    kineticAnimation: KineticAnimation
   ) {
-    if (!canvas || !ctx || !widget || !crosshairManager || !setTools || !errorHandler || !localizationManager || !styleManager || !animationManager) {
+    if (!canvas || !ctx || !widget || !crosshairManager || !setTools || !errorHandler || !localizationManager || !styleManager || !kineticAnimation) {
       throw new Error('Missing dependencies');
     }
     this.canvas = canvas;
@@ -186,7 +183,7 @@ export class DrawingToolManager {
     this.errorHandler = errorHandler;
     this.localizationManager = localizationManager;
     this.styleManager = styleManager;
-    this.animationManager = animationManager;
+    this.kineticAnimation = kineticAnimation;
     this.tools = [];
     this.setTools = setTools;
     this.activeTool = null;
@@ -337,9 +334,7 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      this.lastX = data.x;
-      this.lastTime = performance.now();
-      this.velocity = 0;
+      this.kineticAnimation?.start(data.x);
       this.handleInteraction('mousedown', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -350,13 +345,7 @@ export class DrawingToolManager {
     if (!this.canvas) return;
     try {
       const data = this.getInteractionData(event);
-      if (this.lastX !== null && this.lastTime !== null) {
-        const dx = data.x - this.lastX;
-        const dt = (performance.now() - this.lastTime) / 1000;
-        this.velocity = dx / dt; // Pixels per second
-        this.lastX = data.x;
-        this.lastTime = performance.now();
-      }
+      this.kineticAnimation?.update(data.x);
       this.handleInteraction('mousemove', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -367,12 +356,7 @@ export class DrawingToolManager {
     if (!this.canvas) return;
     try {
       const data = this.getInteractionData(event);
-      if (this.velocity !== 0) {
-        this.animationManager?.startAnimation('scroll', (dx) => this.widget?.handleScroll(dx / this.scaleX(1)), this.velocity / 10, 0.9);
-      }
-      this.lastX = null;
-      this.lastTime = null;
-      this.velocity = 0;
+      this.kineticAnimation?.stop();
       this.handleInteraction('mouseup', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -384,9 +368,7 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      this.lastX = data.x;
-      this.lastTime = performance.now();
-      this.velocity = 0;
+      this.kineticAnimation?.start(data.x);
       this.handleInteraction('mousedown', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -398,13 +380,7 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      if (this.lastX !== null && this.lastTime !== null) {
-        const dx = data.x - this.lastX;
-        const dt = (performance.now() - this.lastTime) / 1000;
-        this.velocity = dx / dt;
-        this.lastX = data.x;
-        this.lastTime = performance.now();
-      }
+      this.kineticAnimation?.update(data.x);
       this.handleInteraction('mousemove', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -416,12 +392,7 @@ export class DrawingToolManager {
     event.preventDefault();
     try {
       const data = this.getInteractionData(event);
-      if (this.velocity !== 0) {
-        this.animationManager?.startAnimation('scroll', (dx) => this.widget?.handleScroll(dx / this.scaleX(1)), this.velocity / 10, 0.9);
-      }
-      this.lastX = null;
-      this.lastTime = null;
-      this.velocity = 0;
+      this.kineticAnimation?.stop();
       this.handleInteraction('mouseup', data);
     } catch (error) {
       this.errorHandler.handleError(error as Error);
@@ -495,7 +466,7 @@ export class DrawingToolManager {
     }
   }
 
-  private getInteractionData(event: MouseEvent | TouchEvent): InteractionData {
+  private getInteractionData(event: MouseEvent | TouchEvent | WheelEvent): InteractionData {
     if (!this.canvas) throw new Error('Canvas not initialized');
     const { x, y } = normalizeEventCoordinates(event, this.canvas);
     const index = this.unscaleX(x);
@@ -1098,7 +1069,7 @@ export class DrawingToolManager {
         this.canvas.removeEventListener('contextmenu', this.handleContextMenu);
         this.canvas.removeEventListener('wheel', this.handleWheel);
       }
-      this.animationManager?.destroy();
+      this.kineticAnimation?.destroy();
       this.canvas = null;
       this.ctx = null;
       this.gl = null;
@@ -1110,9 +1081,6 @@ export class DrawingToolManager {
       this.redoStack = [];
       this.ticks = null;
       this.liveRegion.remove();
-      this.lastX = null;
-      this.lastTime = null;
-      this.velocity = 0;
     } catch (error) {
       this.errorHandler.handleError(error as Error);
     }
